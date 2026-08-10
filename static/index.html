@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Crowd Digital Twin — Event Safety Command Centre</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --navy:#0d2137;--navy2:#112a45;--navy3:#162f4d;
+  --saffron:#FF9933;--green:#138808;--white:#f8f9fa;
+  --border:#dde3ea;--border2:#c8d0da;
+  --text:#1a2535;--text2:#4a5568;--text3:#8896a4;
+  --card:#ffffff;--bg:#f0f4f8;--bg2:#e8edf3;
+  --risk-low:#137333;--risk-low-bg:#e6f4ea;
+  --risk-med:#7a4a00;--risk-med-bg:#fef3e2;
+  --risk-hi:#a50e0e;--risk-hi-bg:#fce8e6;
+  --mono:'IBM Plex Mono',monospace;
+  --sans:'IBM Plex Sans',system-ui,sans-serif;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;overflow:hidden}
+
+/* ── Header ── */
+.header{background:var(--navy);padding:0 18px;height:48px;display:flex;align-items:center;gap:14px;border-bottom:3px solid var(--saffron);flex-shrink:0}
+.emblem{width:34px;height:34px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.emblem svg{width:20px;height:20px}
+.header-title{font-size:14px;font-weight:600;color:#fff;letter-spacing:.01em}
+.header-sub{font-size:10px;color:rgba(255,255,255,.45);margin-top:1px}
+.hsp{flex:1}
+.live-badge{background:var(--green);color:#fff;font-size:10px;padding:3px 9px;border-radius:3px;font-weight:600;letter-spacing:.05em;display:flex;align-items:center;gap:5px;font-family:var(--mono)}
+.live-dot{width:5px;height:5px;border-radius:50%;background:#fff;animation:blink 1.3s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.15}}
+.ws-pill{font-size:10px;padding:3px 8px;border-radius:3px;font-weight:500;font-family:var(--mono);transition:all .3s}
+.ws-live{background:rgba(19,136,8,.2);color:#4caf50}
+.ws-off{background:rgba(165,14,14,.15);color:#e53935}
+.tricolor{display:flex;height:3px;border-radius:2px;overflow:hidden;width:48px;flex-shrink:0}
+.tc-s{background:var(--saffron);flex:1}.tc-w{background:#fff;flex:1}.tc-g{background:var(--green);flex:1}
+
+/* ── Sub-header ── */
+.subheader{background:var(--navy2);padding:0 18px;height:28px;display:flex;align-items:center;gap:14px;font-size:10px;color:rgba(255,255,255,.45);font-family:var(--mono);flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.06)}
+.sh-sep{color:rgba(255,255,255,.15)}
+.sh-v{color:rgba(255,255,255,.8);font-weight:500}
+.shsp{flex:1}
+
+/* ── Metrics row ── */
+.metrics-row{display:grid;grid-template-columns:repeat(4,1fr);gap:0;background:var(--border);border-bottom:1px solid var(--border);flex-shrink:0}
+.metric{background:var(--card);padding:10px 16px;border-right:1px solid var(--border)}
+.metric:last-child{border-right:none}
+.m-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-weight:500;margin-bottom:4px}
+.m-val{font-size:24px;font-weight:600;color:var(--text);line-height:1;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.m-sub{font-size:10px;color:var(--text3);margin-top:3px}
+.m-delta{font-size:11px;font-weight:600;margin-left:7px;font-family:var(--mono)}
+.risk-pill{font-size:10px;padding:2px 8px;border-radius:3px;font-weight:600;font-family:var(--mono);letter-spacing:.03em}
+.rp-low{background:var(--risk-low-bg);color:var(--risk-low)}
+.rp-med{background:var(--risk-med-bg);color:var(--risk-med)}
+.rp-hi{background:var(--risk-hi-bg);color:var(--risk-hi)}
+.risk-bar-outer{height:3px;border-radius:2px;background:var(--bg2);margin-top:6px;overflow:hidden}
+.risk-bar-inner{height:100%;border-radius:2px;transition:width .6s ease,background .4s}
+.spark{display:flex;align-items:flex-end;gap:1.5px;height:18px;margin-top:5px}
+.spb{border-radius:1px;flex:1;min-width:4px;transition:height .4s ease}
+
+/* ── Layout ── */
+.body{display:grid;grid-template-columns:220px 1fr 230px;flex:1;min-height:0;overflow:hidden;background:var(--border);gap:1px}
+.lsb{background:var(--card);display:flex;flex-direction:column;overflow:hidden;min-height:0}
+.main{background:var(--bg);display:flex;flex-direction:column;overflow:hidden;min-height:0}
+.rsb{background:var(--card);display:flex;flex-direction:column;overflow:hidden;min-height:0}
+
+/* ── Sidebar sections ── */
+.sec-title{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:10px 14px 5px;background:var(--bg);border-bottom:1px solid var(--border)}
+.kv-row{display:flex;align-items:center;justify-content:space-between;padding:5px 14px;border-bottom:1px solid var(--border)}
+.kv-k{font-size:11px;color:var(--text2)}
+.kv-v{font-size:11px;font-weight:500;color:var(--text);font-family:var(--mono)}
+.ds-tag{display:inline-block;font-size:9px;padding:1px 5px;border-radius:2px;background:rgba(19,136,8,.1);color:var(--risk-low);margin:1px;font-family:var(--mono)}
+.seg-fps{display:flex;gap:2px;align-items:flex-end;height:13px}
+.seg{width:4px;border-radius:1px;transition:background .3s}
+.nfr-row{display:flex;align-items:center;justify-content:space-between;padding:4px 14px;border-bottom:1px solid var(--border)}
+.nfr-k{font-size:11px;color:var(--text2)}
+.nfr-pass{font-size:10px;font-weight:600;color:var(--risk-low);font-family:var(--mono)}
+.nfr-fail{font-size:10px;font-weight:600;color:var(--risk-hi);font-family:var(--mono)}
+
+/* ── Camera / heatmap ── */
+.cam-wrap{flex:1;background:#0d1b2a;position:relative;min-height:0;overflow:hidden}
+.cam-feed{width:100%;height:100%;object-fit:contain;display:none}
+.cam-overlay-label{position:absolute;top:8px;left:8px;font-size:10px;color:rgba(255,255,255,.65);background:rgba(0,0,0,.55);padding:2px 7px;border-radius:2px;font-family:var(--mono)}
+.cam-fps-badge{position:absolute;top:8px;right:8px;font-size:10px;font-family:var(--mono);color:#4caf50;background:rgba(0,0,0,.55);padding:2px 7px;border-radius:2px}
+.no-feed{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;color:var(--text3)}
+.no-feed-icon{width:40px;height:40px;border:1px solid rgba(255,255,255,.15);border-radius:6px;display:flex;align-items:center;justify-content:center}
+
+/* ── Zone grid ── */
+.zone-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:0;background:var(--border);border-top:1px solid var(--border);flex-shrink:0}
+.zone-cell{background:var(--card);padding:7px 8px;border-right:1px solid var(--border);cursor:pointer;transition:background .15s;min-height:72px;display:flex;flex-direction:column;justify-content:center}
+.zone-cell:last-child{border-right:none}
+.zone-cell:hover{background:var(--bg2)}
+.zc-name{font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:3px;font-weight:500}
+.zc-count{font-size:20px;font-weight:600;font-family:var(--mono);line-height:1;transition:color .3s;font-variant-numeric:tabular-nums}
+.zc-bar{height:2px;background:var(--border);border-radius:1px;margin-top:4px;overflow:hidden}
+.zc-fill{height:100%;border-radius:1px;transition:width .5s ease,background .4s}
+.zc-risk{font-size:9px;font-weight:600;font-family:var(--mono);margin-top:3px;letter-spacing:.02em}
+.zc-pred{font-size:9px;color:var(--text3);margin-top:1px;font-family:var(--mono)}
+
+/* ── Scenario bar ── */
+.scen-bar{padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex-shrink:0;background:var(--bg)}
+.scen-btn{font-size:10px;padding:3px 9px;border-radius:3px;border:1px solid var(--border);background:var(--card);color:var(--text2);cursor:pointer;font-weight:500;transition:all .15s;font-family:var(--mono)}
+.scen-btn:hover{background:var(--bg2)}
+.scen-btn.active{background:var(--navy);color:#fff;border-color:var(--navy)}
+
+/* ── Right sidebar ── */
+.alert-list{flex:1;overflow-y:auto;min-height:0}
+.alert-list::-webkit-scrollbar{width:3px}
+.alert-list::-webkit-scrollbar-thumb{background:var(--border2)}
+.alert-item{padding:7px 12px;border-bottom:1px solid var(--border);display:flex;gap:7px}
+.a-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;margin-top:3px}
+.a-text{font-size:11px;color:var(--text);line-height:1.4}
+.a-time{font-size:10px;color:var(--text3);margin-top:1px;font-family:var(--mono)}
+.fusion-panel{padding:10px 12px;border-top:1px solid var(--border);background:var(--bg);flex-shrink:0}
+.fp-title{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px}
+.fp-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border);font-size:11px}
+.fp-row:last-child{border-bottom:none}
+.fp-k{color:var(--text3)}
+.fp-v{font-weight:500;color:var(--text);font-family:var(--mono)}
+.sim-panel{padding:10px 12px;border-top:1px solid var(--border);flex-shrink:0}
+.sp-title{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
+
+/* ── Ticker ── */
+.ticker{background:#1a2535;padding:5px 16px;display:flex;align-items:center;gap:10px;font-size:11px;flex-shrink:0}
+.ticker-label{color:var(--saffron);font-weight:600;font-size:10px;font-family:var(--mono);letter-spacing:.06em;flex-shrink:0}
+.ticker-text{color:rgba(255,255,255,.6);font-family:var(--mono);font-size:10px;flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.ticker-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;animation:blink 1.3s ease-in-out infinite}
+
+/* ── Footer ── */
+.footer{background:var(--navy);padding:5px 18px;display:flex;align-items:center;justify-content:space-between;font-size:10px;flex-shrink:0}
+.footer-left{color:rgba(255,255,255,.35);font-family:var(--mono)}
+.footer-tags{display:flex;gap:6px}
+.footer-tag{background:rgba(255,255,255,.07);color:rgba(255,255,255,.45);padding:1px 7px;border-radius:2px;font-size:9px;font-family:var(--mono)}
+
+/* ── Shell ── */
+.shell{display:flex;flex-direction:column;height:100vh}
+.body-wrap{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<!-- HEADER -->
+<div class="header">
+  <div class="emblem">
+    <svg viewBox="0 0 20 20" fill="none">
+      <circle cx="10" cy="10" r="8" stroke="#0d2137" stroke-width="1.5"/>
+      <circle cx="10" cy="10" r="3" fill="#0d2137"/>
+      <line x1="10" y1="2" x2="10" y2="18" stroke="#0d2137" stroke-width="1"/>
+      <line x1="2" y1="10" x2="18" y2="10" stroke="#0d2137" stroke-width="1"/>
+    </svg>
+  </div>
+  <div>
+    <div class="header-title">Crowd Digital Twin — Event Safety Command Centre</div>
+    <div class="header-sub">Ministry of Home Affairs · Disaster Management Division · NDMA Aligned</div>
+  </div>
+  <div class="hsp"></div>
+  <div class="tricolor"><div class="tc-s"></div><div class="tc-w"></div><div class="tc-g"></div></div>
+  <div class="ws-pill ws-off" id="ws-pill">connecting...</div>
+  <div class="live-badge"><div class="live-dot"></div>LIVE</div>
+</div>
+
+<!-- SUB-HEADER -->
+<div class="subheader">
+  <span>Site</span><span class="sh-v" id="sh-site">MOT17-09 · Mall</span>
+  <span class="sh-sep">|</span>
+  <span>Frame</span><span class="sh-v" id="sh-frame">#—</span>
+  <span class="sh-sep">|</span>
+  <span>Model</span><span class="sh-v">YOLOv8n + ByteTrack</span>
+  <span class="sh-sep">|</span>
+  <span>Datasets</span><span class="sh-v">MOT17 · UCF-CC-50 · ETH/UCY · Mall</span>
+  <div class="shsp"></div>
+  <span class="sh-v" id="sh-time">—</span>
+</div>
+
+<!-- METRICS ROW -->
+<div class="metrics-row">
+  <div class="metric">
+    <div class="m-label">Tracked persons</div>
+    <div style="display:flex;align-items:baseline;gap:8px">
+      <div class="m-val" id="m-agents">—</div>
+      <span class="m-delta" id="m-delta"></span>
+    </div>
+    <div class="m-sub">fused: <span id="m-fused">—</span></div>
+    <div class="spark" id="sp-agents"></div>
+  </div>
+  <div class="metric">
+    <div class="m-label">Scene risk score</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:2px">
+      <div class="m-val" id="m-risk">—</div>
+      <span class="risk-pill rp-med" id="m-risklbl">—</span>
+    </div>
+    <div class="m-sub">confidence: <span id="m-conf">—</span></div>
+    <div class="risk-bar-outer"><div class="risk-bar-inner" id="risk-bar" style="width:0%"></div></div>
+  </div>
+  <div class="metric">
+    <div class="m-label">Crowd trend</div>
+    <div class="m-val" id="m-trend" style="font-size:16px;margin-top:4px">—</div>
+    <div class="m-sub" id="m-slope">slope — · R²—</div>
+    <div class="spark" id="sp-speed"></div>
+  </div>
+  <div class="metric">
+    <div class="m-label">Simulation</div>
+    <div class="m-val" style="font-size:15px;margin-top:4px" id="m-sim">—</div>
+    <div class="m-sub" id="m-simreason">—</div>
+    <div style="display:flex;gap:4px;margin-top:6px" id="nfr-badges">
+      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">FPS</span>
+      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">Latency</span>
+      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">Edge AI</span>
+    </div>
+  </div>
+</div>
+
+<!-- BODY -->
+<div class="body-wrap" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+<div class="body" style="flex:1;min-height:0">
+
+<!-- LEFT SIDEBAR -->
+<div class="lsb">
+  <div class="sec-title">Pipeline</div>
+  <div class="kv-row"><span class="kv-k">Model</span><span class="kv-v">YOLOv8n</span></div>
+  <div class="kv-row"><span class="kv-k">Tracker</span><span class="kv-v">ByteTrack</span></div>
+  <div class="kv-row"><span class="kv-k">FPS</span>
+    <span style="display:flex;align-items:center;gap:5px">
+      <span class="kv-v" id="kv-fps">—</span>
+      <span class="seg-fps" id="seg-fps"></span>
+    </span>
+  </div>
+  <div class="kv-row"><span class="kv-k">Latency</span><span class="kv-v" id="kv-lat">—</span></div>
+  <div class="kv-row"><span class="kv-k">Mean conf</span><span class="kv-v" id="kv-mconf">—</span></div>
+  <div class="kv-row"><span class="kv-k">Frame skip</span><span class="kv-v">Every 2nd</span></div>
+  <div class="kv-row"><span class="kv-k">Horizon</span><span class="kv-v">20 s</span></div>
+  <div class="kv-row"><span class="kv-k">Zones</span><span class="kv-v">2×3 grid</span></div>
+
+  <div class="sec-title">NFR checks</div>
+  <div class="nfr-row"><span class="nfr-k">FPS ≥ 10</span><span class="nfr-pass" id="nfr-fps">—</span></div>
+  <div class="nfr-row"><span class="nfr-k">Latency &lt; 2s</span><span class="nfr-pass" id="nfr-lat">—</span></div>
+  <div class="nfr-row"><span class="nfr-k">Fusion active</span><span class="nfr-pass">Pass</span></div>
+  <div class="nfr-row"><span class="nfr-k">IoT simulated</span><span class="nfr-pass">Pass</span></div>
+  <div class="nfr-row"><span class="nfr-k">ETH/UCY prior</span><span class="nfr-pass">Active</span></div>
+
+  <div class="sec-title">Datasets</div>
+  <div style="padding:8px 14px;display:flex;flex-wrap:wrap;gap:3px">
+    <span class="ds-tag">MOT17</span>
+    <span class="ds-tag">UCF-CC-50</span>
+    <span class="ds-tag">ETH/UCY</span>
+    <span class="ds-tag">Mall</span>
+    <span class="ds-tag">ShanghaiTech*</span>
+  </div>
+
+  <div class="sec-title">Fusion weights</div>
+  <div class="kv-row"><span class="kv-k">Video (Stream 1)</span><span class="kv-v">0.70</span></div>
+  <div class="kv-row"><span class="kv-k">IoT (Stream 2)</span><span class="kv-v">0.30</span></div>
+  <div class="kv-row"><span class="kv-k">Mobility prior</span><span class="kv-v">modifier</span></div>
+  <div class="kv-row"><span class="kv-k">Discrepancy δ</span><span class="kv-v">5 persons</span></div>
+  <div class="kv-row"><span class="kv-k">IoT entry</span><span class="kv-v" id="kv-entry">—</span></div>
+  <div class="kv-row"><span class="kv-k">IoT exit</span><span class="kv-v" id="kv-exit">—</span></div>
+  <div class="kv-row"><span class="kv-k">Occlusion flag</span><span class="kv-v" id="kv-occ">—</span></div>
+</div>
+
+<!-- MAIN CONTENT -->
+<div class="main">
+  <div class="scen-bar" id="scen-bar">
+    <span style="font-size:10px;color:var(--text3);font-family:var(--mono);flex-shrink:0">SCENARIO</span>
+    <button class="scen-btn active" onclick="setScenario(0,this)">Mall</button>
+    <button class="scen-btn" onclick="setScenario(1,this)">Concert surge</button>
+    <button class="scen-btn" onclick="setScenario(2,this)">Temple gathering</button>
+    <button class="scen-btn" onclick="setScenario(3,this)">Kumbh Mela</button>
+    <button class="scen-btn" onclick="setScenario(4,this)">Evacuation</button>
+  </div>
+
+  <div class="cam-wrap" id="cam-wrap">
+    <img id="cam-feed" class="cam-feed" alt="Live heatmap feed">
+    <div id="no-feed" class="no-feed">
+      <div class="no-feed-icon">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <rect x="1" y="3.5" width="12" height="11" rx="1.5" stroke="rgba(255,255,255,.3)" stroke-width="1.1"/>
+          <path d="M13 8l4-2.5v7L13 10V8z" stroke="rgba(255,255,255,.3)" stroke-width="1.1" fill="none"/>
+        </svg>
+      </div>
+      <span style="font-size:11px">Waiting for video pipeline...</span>
+      <span style="font-size:10px;font-family:var(--mono);color:rgba(255,255,255,.3)" id="ws-url">ws://localhost:8000/ws</span>
+    </div>
+    <div class="cam-overlay-label" id="cam-label">LIVE · YOLOv8n + ByteTrack + Data Fusion</div>
+    <div class="cam-fps-badge" id="cam-fps">— FPS</div>
+  </div>
+
+  <div class="zone-grid" id="zone-grid"></div>
+</div>
+
+<!-- RIGHT SIDEBAR -->
+<div class="rsb">
+  <div class="sec-title">Incident alerts</div>
+  <div class="alert-list" id="alert-list"></div>
+
+  <div class="fusion-panel">
+    <div class="fp-title">Data fusion — stream comparison</div>
+    <div class="fp-row"><span class="fp-k">Video count</span><span class="fp-v" id="fp-vc">—</span></div>
+    <div class="fp-row"><span class="fp-k">IoT count</span><span class="fp-v" id="fp-ic">—</span></div>
+    <div class="fp-row"><span class="fp-k">Fused count</span><span class="fp-v" id="fp-fc" style="color:var(--risk-low)">—</span></div>
+    <div class="fp-row"><span class="fp-k">Fusion conf</span><span class="fp-v" id="fp-fconf">—</span></div>
+    <div class="fp-row"><span class="fp-k">Discrepancy</span><span class="fp-v" id="fp-disc">—</span></div>
+    <div class="fp-row"><span class="fp-k">Occlusion</span><span class="fp-v" id="fp-occ">—</span></div>
+    <div class="fp-row"><span class="fp-k">Conf scale</span><span class="fp-v" id="fp-scale">—</span></div>
+  </div>
+
+  <div class="sim-panel">
+    <div class="sp-title">What-if simulation +20 s</div>
+    <div class="fp-row"><span class="fp-k">Trigger</span><span class="fp-v" id="sim-trig">—</span></div>
+    <div class="fp-row"><span class="fp-k">Trend slope</span><span class="fp-v" id="sim-slope">—</span></div>
+    <div class="fp-row"><span class="fp-k">Predicted total</span><span class="fp-v" id="sim-pred">—</span></div>
+    <div class="fp-row"><span class="fp-k">Fruin LOS</span><span class="fp-v" id="sim-los">—</span></div>
+  </div>
+</div>
+
+</div><!-- /body -->
+
+<!-- TICKER -->
+<div class="ticker">
+  <span class="ticker-dot" id="ticker-dot" style="background:var(--saffron)"></span>
+  <span class="ticker-label">ALERT</span>
+  <span class="ticker-text" id="ticker-text">Crowd Digital Twin · Team 28 · PES University · Capstone Phase 2</span>
+  <span style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.3)" id="ticker-count">0 alerts</span>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <div class="footer-left">Team 28 · PES University · UE23CS320A · Guide: Dr. Richa Sharma · 2025–26</div>
+  <div class="footer-tags">
+    <div class="footer-tag">NDMA Aligned</div>
+    <div class="footer-tag">Fruin LOS</div>
+    <div class="footer-tag">Edge AI</div>
+    <div class="footer-tag">Multi-Modal Fusion</div>
+    <div class="footer-tag">Open Source</div>
+  </div>
+</div>
+
+</div><!-- /shell -->
+</div>
+
+<script>
+const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+const ZONES  = ['Zone_A','Zone_B','Zone_C','Zone_D','Zone_E','Zone_F'];
+const CAPS   = [22,18,20,16,18,14];
+
+const SCENARIOS = [
+  {name:'Mall (demo)',     riskBase:0.52, site:'MOT17-09 · Mall CCTV', counts:[16,7,3,8,5,5]},
+  {name:'Concert surge',   riskBase:0.72, site:'Concert venue · Gate B surge', counts:[20,16,12,14,15,10]},
+  {name:'Temple gathering',riskBase:0.80, site:'Temple entrance · Aarti hour', counts:[21,17,18,15,17,13]},
+  {name:'Kumbh Mela',      riskBase:0.91, site:'Prayagraj Ghat · Mauni Amavasya', counts:[22,18,20,16,18,14]},
+  {name:'Evacuation',      riskBase:0.44, site:'Emergency evacuation drill', counts:[22,6,3,2,2,1]},
+];
+
+let scIdx    = 0;
+let agBuf    = [];
+let spBuf    = [];
+let prevN    = 0;
+let alertHistory = [];
+let frameN   = 0;
+let ws, reconnTimer;
+let zoneGrid_built = false;
+
+const TICKERS = [
+  'Zone A: HIGH density detected. Crowd control units advised.',
+  'Simulation active — GROWING trend. +20s prediction: scene count increases.',
+  'Data fusion: IoT stream agrees with video within δ=5. Confidence HIGH.',
+  'Edge AI pipeline: YOLOv8n · ByteTrack · 3-stream fusion · 10 Hz WebSocket.',
+  'Fruin Level-of-Service: Zone A approaching Level E (>3 persons/m²).',
+  'ETH/UCY mobility priors active. Zone confidence calibrated.',
+];
+let tIdx = 0;
+
+function riskColor(rl){return rl==='HIGH'?'var(--risk-hi)':rl==='MEDIUM'?'var(--risk-med)':'var(--risk-low)'}
+function riskBg(rl){return rl==='HIGH'?'var(--risk-hi-bg)':rl==='MEDIUM'?'var(--risk-med-bg)':'var(--risk-low-bg)'}
+function riskPillCls(rl){return rl==='HIGH'?'rp-hi':rl==='MEDIUM'?'rp-med':'rp-low'}
+function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
+
+function spark(id,buf,col){
+  const el=document.getElementById(id);if(!el)return;
+  el.innerHTML='';
+  const mx=Math.max(...buf,1);
+  buf.forEach(v=>{
+    const b=document.createElement('div');b.className='spb';
+    b.style.height=Math.round(2+15*(v/mx))+'px';b.style.background=col;
+    el.appendChild(b);
+  });
+}
+
+function buildSegs(fps){
+  const el=document.getElementById('seg-fps');if(!el)return;
+  el.innerHTML='';
+  const n=Math.round(Math.min(fps,25)/5);
+  for(let i=0;i<5;i++){
+    const s=document.createElement('span');s.className='seg';
+    s.style.width='4px';s.style.height=(4+i*2)+'px';
+    s.style.background=i<n?'#137333':'#dde3ea';
+    el.appendChild(s);
+  }
+}
+
+function buildZoneGrid(zones){
+  const g=document.getElementById('zone-grid');if(!g)return;
+  if(!zoneGrid_built){
+    g.innerHTML='';
+    ZONES.forEach(name=>{
+      const cell=document.createElement('div');
+      cell.className='zone-cell';cell.id='zc-'+name;
+      cell.innerHTML=`
+        <div class="zc-name">${name.replace('_',' ')}</div>
+        <div class="zc-count" id="zcc-${name}">—</div>
+        <div class="zc-bar"><div class="zc-fill" id="zcf-${name}" style="width:0%"></div></div>
+        <div class="zc-risk" id="zcr-${name}">—</div>
+        <div class="zc-pred" id="zcp-${name}">pred —</div>`;
+      cell.onclick=()=>{
+        const z=zones[name]||{};
+        const los=(z.density*10).toFixed(2);
+        alert(`${name.replace('_',' ')}\nCount: ${z.count||0} / ${z.capacity||'?'}\nRisk: ${z.risk||'—'}\nDensity: ${(z.density||0).toFixed(4)}\nFruin LOS density: ~${los} p/m²\nFlow: (${z.flow_x||0}, ${z.flow_y||0})\nPredicted +20s: ${z.predicted||0}`);
+      };
+      g.appendChild(cell);
+    });
+    zoneGrid_built=true;
+  }
+  ZONES.forEach((name,i)=>{
+    const z=zones[name];if(!z)return;
+    const cap=z.capacity||CAPS[i];
+    const pct=Math.round(Math.min(z.count/Math.max(z.count,cap),1)*100);
+    const rc=riskColor(z.risk);
+    setText('zcc-'+name,z.count);
+    const cEl=document.getElementById('zcc-'+name);if(cEl)cEl.style.color=rc;
+    const fEl=document.getElementById('zcf-'+name);
+    if(fEl){fEl.style.width=pct+'%';fEl.style.background=rc}
+    const rEl=document.getElementById('zcr-'+name);
+    if(rEl){rEl.textContent=z.risk;rEl.style.color=rc}
+    setText('zcp-'+name,'pred '+z.predicted);
+  });
+}
+
+function buildAlerts(newAlerts){
+  const now=new Date().toLocaleTimeString('en-IN',{hour12:false});
+  newAlerts.forEach(a=>alertHistory.unshift({
+    msg:a,time:now,
+    col:a.includes('CRITICAL')?'var(--risk-hi)':'var(--risk-med)'
+  }));
+  alertHistory=alertHistory.slice(0,40);
+  const g=document.getElementById('alert-list');if(!g)return;
+  g.innerHTML='';
+  alertHistory.slice(0,10).forEach(a=>{
+    const d=document.createElement('div');d.className='alert-item';
+    d.innerHTML=`<div class="a-dot" style="background:${a.col}"></div>
+      <div><div class="a-text">${a.msg}</div><div class="a-time">${a.time}</div></div>`;
+    g.appendChild(d);
+  });
+}
+
+let scActive = false;
+
+function setScenario(i, el){
+  scIdx=i;
+  document.querySelectorAll('.scen-btn').forEach(b=>b.classList.remove('active'));
+  el.classList.add('active');
+  setText('sh-site', SCENARIOS[i].site);
+  scActive=true;
+}
+
+function update(d){
+  frameN=d.frame_idx;
+  const n=d.n_agents;
+  const delta=n-prevN; prevN=n;
+  agBuf.push(n);if(agBuf.length>20)agBuf.shift();
+  spBuf.push(d.mean_speed||0);if(spBuf.length>20)spBuf.shift();
+
+  setText('m-agents',n);
+  setText('m-fused',d.fused_count);
+  const dEl=document.getElementById('m-delta');
+  if(dEl){dEl.textContent=(delta>=0?'+':'')+delta;dEl.style.color=delta>0?'var(--risk-hi)':'var(--risk-low)'}
+
+  const rs=d.risk_score||0;
+  const rl=d.risk_label||'LOW';
+  setText('m-risk',(rs).toFixed(2));
+  const rlEl=document.getElementById('m-risklbl');
+  if(rlEl){rlEl.textContent=rl;rlEl.className='risk-pill '+riskPillCls(rl)}
+  const rb=document.getElementById('risk-bar');
+  if(rb){rb.style.width=Math.round(rs*100)+'%';rb.style.background=riskColor(rl)}
+  setText('m-conf',(d.mean_confidence||0).toFixed(2));
+
+  const tr=d.crowd_trend||'STABLE';
+  const tEl=document.getElementById('m-trend');
+  if(tEl){tEl.textContent=tr;tEl.style.color=tr==='GROWING'?'var(--risk-hi)':tr==='DISPERSING'?'var(--risk-low)':'var(--risk-med)'}
+  setText('m-slope',`slope ${(d.trend_slope>=0?'+':'')+d.trend_slope} · R²${d.trend_r2}`);
+
+  const simOn=d.sim_triggered;
+  const sEl=document.getElementById('m-sim');
+  if(sEl){sEl.textContent=simOn?'Active · +20s':'Idle';sEl.style.color=simOn?'var(--risk-low)':'var(--risk-med)'}
+  setText('m-simreason',`Trend: ${tr}${rl==='HIGH'?' + HIGH':''}`)
+
+  setText('kv-fps',d.fps+' fps');
+  setText('kv-lat',d.latency_ms+' ms');
+  setText('kv-mconf',(d.mean_confidence||0).toFixed(2));
+  buildSegs(d.fps||0);
+
+  const nfr=d.nfr||{};
+  const nfEl=document.getElementById('nfr-fps');
+  if(nfEl){nfEl.textContent=nfr.fps_pass?'Pass':'Fail';nfEl.className=nfr.fps_pass?'nfr-pass':'nfr-fail'}
+  const nlEl=document.getElementById('nfr-lat');
+  if(nlEl){nlEl.textContent=nfr.latency_pass?'Pass':'Fail';nlEl.className=nfr.latency_pass?'nfr-pass':'nfr-fail'}
+
+  setText('sh-frame','#'+String(frameN).padStart(4,'0'));
+  setText('sh-time',new Date().toLocaleTimeString('en-IN'));
+
+  if(d.heatmap_b64){
+    const img=document.getElementById('cam-feed');
+    const nf=document.getElementById('no-feed');
+    if(img){img.src='data:image/jpeg;base64,'+d.heatmap_b64;img.style.display='block'}
+    if(nf)nf.style.display='none';
+    setText('cam-fps',(d.fps||0)+' FPS');
+    setText('cam-label',`LIVE · ${n} tracked · ${rl} risk · Fusion conf ${(d.fusion?.confidence||0).toFixed(2)}`);
+  }
+
+  if(d.zones)buildZoneGrid(d.zones);
+  buildAlerts(d.alerts||[]);
+
+  // Fusion panel
+  const f=d.fusion||{};
+  setText('fp-vc',f.video_count??'—');
+  setText('fp-ic',f.iot_count??'—');
+  setText('fp-fc',f.fused_count??'—');
+  setText('fp-fconf',(f.confidence??0).toFixed(3));
+  setText('fp-disc',f.discrepancy??'—');
+  const occEl=document.getElementById('fp-occ');
+  if(occEl){
+    occEl.textContent=f.occlusion_flag?'YES — boosting conf':'No';
+    occEl.style.color=f.occlusion_flag?'var(--risk-med)':'var(--risk-low)';
+  }
+  setText('fp-scale',(f.conf_scale??1).toFixed(3));
+  setText('kv-entry',f.iot_entry??'—');
+  setText('kv-exit',f.iot_exit??'—');
+  const occKvEl=document.getElementById('kv-occ');
+  if(occKvEl){occKvEl.textContent=f.occlusion_flag?'YES':'No';occKvEl.style.color=f.occlusion_flag?'var(--risk-med)':'var(--risk-low)'}
+
+  // Simulation panel
+  const predTotal=d.zones?Object.values(d.zones).reduce((s,z)=>s+(z.predicted||0),0):0;
+  setText('sim-trig',simOn?'Active':'Idle');
+  const stEl=document.getElementById('sim-trig');if(stEl)stEl.style.color=simOn?'var(--risk-low)':'var(--risk-med)';
+  setText('sim-slope',(d.trend_slope>=0?'+':'')+d.trend_slope);
+  setText('sim-pred',predTotal);
+  // Rough Fruin LOS estimate
+  const avgDens=d.zones?Object.values(d.zones).reduce((s,z)=>s+(z.density||0),0)/Object.keys(d.zones).length:0;
+  const los=avgDens<0.5?'A (safe)':avgDens<1?'B':avgDens<2?'C':avgDens<3?'D':avgDens<4?'E (caution)':'F (danger)';
+  setText('sim-los',los);
+
+  // Ticker
+  tIdx=(tIdx+1)%TICKERS.length;
+  setText('ticker-text',(d.alerts&&d.alerts.length>0)?d.alerts.join('  ·  '):TICKERS[tIdx]);
+  const tdEl=document.getElementById('ticker-dot');
+  if(tdEl)tdEl.style.background=rl==='HIGH'?'var(--risk-hi)':rl==='MEDIUM'?'var(--saffron)':'var(--green)';
+  setText('ticker-count',alertHistory.length+' alerts');
+
+  spark('sp-agents',agBuf,'#1a73e8');
+  spark('sp-speed',spBuf,'#e8a000');
+}
+
+function connect(){
+  const pill=document.getElementById('ws-pill');
+  if(pill){pill.textContent='connecting...';pill.className='ws-pill ws-off'}
+  ws=new WebSocket(WS_URL);
+  ws.onopen=()=>{
+    if(pill){pill.textContent='live';pill.className='ws-pill ws-live'}
+    clearTimeout(reconnTimer);
+    setInterval(()=>{if(ws&&ws.readyState===1)ws.send('ping')},5000);
+  };
+  ws.onmessage=e=>{
+    try{update(JSON.parse(e.data))}catch(err){console.warn(err)}
+  };
+  ws.onclose=()=>{
+    if(pill){pill.textContent='reconnecting';pill.className='ws-pill ws-off'}
+    reconnTimer=setTimeout(connect,2000);
+  };
+  ws.onerror=()=>ws.close();
+}
+
+connect();
+</script>
+</body>
+</html>

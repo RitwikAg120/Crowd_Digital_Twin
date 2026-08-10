@@ -1,0 +1,15 @@
+Drop ETH/UCY pedestrian trajectory .txt files in this folder (any subfolder
+structure is fine -- the loader globs **/*.txt recursively).
+
+Expected format per line (tab or space separated):
+  frame_id  pedestrian_id  x  y
+
+Download sources (require internet access not available when this package
+was built):
+  ETH:  https://icu.ee.ethz.ch/research/datsets.html
+  UCY:  https://graphics.cs.ucy.ac.cy/research/downloads/crowd-data
+
+If this folder is left empty, main.py automatically falls back to uniform
+zone calibration (weight = 1.0 for all zones) and the pipeline still runs
+correctly -- this is handled by DataFusionLayer.load_mobility_prior()'s
+try/except fallback (see report section 4.6, Reliability).
