@@ -1,15 +1,6 @@
-# Crowd Digital Twin (CDT) — Runnable Package
+# Crowd Digital Twin (CDT) 
 
-Team 28 | PES University | UE23CS320B Capstone Phase 2
-Guide: Dr. Richa Sharma
 
-This package is a **fully functional, runnable** version of the Crowd Digital
-Twin pipeline described in your capstone report. It runs end-to-end today:
-real YOLOv8n person detection -> ByteTrack multi-object tracking -> three-stream
-data fusion -> agent-based digital twin -> risk scoring -> live FastAPI/WebSocket
-dashboard.
-
----
 
 ## 1. What's included
 
