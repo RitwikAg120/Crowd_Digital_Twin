@@ -4,3 +4,12 @@ venv/
 .venv/
 runs/
 *.log
+
+# Large Datasets & Media
+CrowdHuman.zip
+Crowdhuman/
+dataset_crowdhuman/
+dataset/
+videos/*.mp4
+experience/
+*.pt

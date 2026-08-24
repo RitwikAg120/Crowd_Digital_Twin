@@ -5,583 +5,688 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Crowd Digital Twin — Event Safety Command Centre</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --navy:#0d2137;--navy2:#112a45;--navy3:#162f4d;
-  --saffron:#FF9933;--green:#138808;--white:#f8f9fa;
-  --border:#dde3ea;--border2:#c8d0da;
-  --text:#1a2535;--text2:#4a5568;--text3:#8896a4;
-  --card:#ffffff;--bg:#f0f4f8;--bg2:#e8edf3;
-  --risk-low:#137333;--risk-low-bg:#e6f4ea;
-  --risk-med:#7a4a00;--risk-med-bg:#fef3e2;
-  --risk-hi:#a50e0e;--risk-hi-bg:#fce8e6;
-  --mono:'IBM Plex Mono',monospace;
-  --sans:'IBM Plex Sans',system-ui,sans-serif;
+  --bg:#090d16;
+  --bg-card:rgba(15, 23, 42, 0.75);
+  --bg-card-hover:rgba(30, 41, 59, 0.85);
+  --border:rgba(255, 255, 255, 0.08);
+  --border-glow:rgba(6, 182, 212, 0.3);
+  --text:#f8fafc;
+  --text-muted:#94a3b8;
+  --text-dim:#64748b;
+  --cyan:#06b6d4;
+  --cyan-glow:rgba(6, 182, 212, 0.2);
+  --emerald:#10b981;
+  --emerald-bg:rgba(16, 185, 129, 0.15);
+  --amber:#f59e0b;
+  --amber-bg:rgba(245, 158, 11, 0.15);
+  --rose:#ef4444;
+  --rose-bg:rgba(239, 68, 68, 0.15);
+  --saffron:#ff9933;
+  --mono:'JetBrains Mono',monospace;
+  --sans:'Plus Jakarta Sans',system-ui,sans-serif;
 }
-html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;overflow:hidden}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;overflow:hidden;-webkit-font-smoothing:antialiased}
 
 /* ── Header ── */
-.header{background:var(--navy);padding:0 18px;height:48px;display:flex;align-items:center;gap:14px;border-bottom:3px solid var(--saffron);flex-shrink:0}
-.emblem{width:34px;height:34px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.emblem svg{width:20px;height:20px}
-.header-title{font-size:14px;font-weight:600;color:#fff;letter-spacing:.01em}
-.header-sub{font-size:10px;color:rgba(255,255,255,.45);margin-top:1px}
+.header{
+  background:rgba(11, 19, 41, 0.95);
+  backdrop-filter:blur(12px);
+  padding:0 20px;
+  height:52px;
+  display:flex;
+  align-items:center;
+  gap:16px;
+  border-bottom:1px solid var(--border);
+  position:relative;
+  z-index:10;
+}
+.header::after{
+  content:'';
+  position:absolute;
+  bottom:-1px;
+  left:0;
+  right:0;
+  height:2px;
+  background:linear-gradient(90deg, var(--saffron), #ffffff, var(--emerald));
+}
+.emblem{
+  width:36px;
+  height:36px;
+  border-radius:8px;
+  background:linear-gradient(135deg, #1e293b, #0f172a);
+  border:1px solid var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  box-shadow:0 0 15px rgba(6, 182, 212, 0.15);
+}
+.emblem svg{width:22px;height:22px}
+.header-title{font-size:15px;font-weight:700;color:#fff;letter-spacing:-0.01em;display:flex;align-items:center;gap:8px}
+.header-sub{font-size:11px;color:var(--text-muted);font-weight:500}
 .hsp{flex:1}
-.live-badge{background:var(--green);color:#fff;font-size:10px;padding:3px 9px;border-radius:3px;font-weight:600;letter-spacing:.05em;display:flex;align-items:center;gap:5px;font-family:var(--mono)}
-.live-dot{width:5px;height:5px;border-radius:50%;background:#fff;animation:blink 1.3s ease-in-out infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.15}}
-.ws-pill{font-size:10px;padding:3px 8px;border-radius:3px;font-weight:500;font-family:var(--mono);transition:all .3s}
-.ws-live{background:rgba(19,136,8,.2);color:#4caf50}
-.ws-off{background:rgba(165,14,14,.15);color:#e53935}
-.tricolor{display:flex;height:3px;border-radius:2px;overflow:hidden;width:48px;flex-shrink:0}
-.tc-s{background:var(--saffron);flex:1}.tc-w{background:#fff;flex:1}.tc-g{background:var(--green);flex:1}
+
+.live-badge{
+  background:var(--emerald-bg);
+  color:var(--emerald);
+  border:1px solid rgba(16, 185, 129, 0.3);
+  font-size:11px;
+  padding:4px 10px;
+  border-radius:6px;
+  font-weight:700;
+  letter-spacing:0.05em;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font-family:var(--mono);
+}
+.live-dot{
+  width:6px;
+  height:6px;
+  border-radius:50%;
+  background:var(--emerald);
+  box-shadow:0 0 8px var(--emerald);
+  animation:pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(0.8)}}
+
+.ws-pill{
+  font-size:11px;
+  padding:4px 10px;
+  border-radius:6px;
+  font-weight:600;
+  font-family:var(--mono);
+  transition:all .3s;
+}
+.ws-live{background:rgba(6, 182, 212, 0.15);color:var(--cyan);border:1px solid rgba(6, 182, 212, 0.3)}
+.ws-off{background:rgba(239, 68, 68, 0.15);color:var(--rose);border:1px solid rgba(239, 68, 68, 0.3)}
 
 /* ── Sub-header ── */
-.subheader{background:var(--navy2);padding:0 18px;height:28px;display:flex;align-items:center;gap:14px;font-size:10px;color:rgba(255,255,255,.45);font-family:var(--mono);flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.06)}
-.sh-sep{color:rgba(255,255,255,.15)}
-.sh-v{color:rgba(255,255,255,.8);font-weight:500}
+.subheader{
+  background:rgba(15, 23, 42, 0.8);
+  padding:0 20px;
+  height:32px;
+  display:flex;
+  align-items:center;
+  gap:16px;
+  font-size:11px;
+  color:var(--text-muted);
+  font-family:var(--mono);
+  border-bottom:1px solid var(--border);
+}
+.sh-sep{color:var(--text-dim)}
+.sh-v{color:var(--text);font-weight:600}
 .shsp{flex:1}
 
-/* ── Metrics row ── */
-.metrics-row{display:grid;grid-template-columns:repeat(4,1fr);gap:0;background:var(--border);border-bottom:1px solid var(--border);flex-shrink:0}
-.metric{background:var(--card);padding:10px 16px;border-right:1px solid var(--border)}
-.metric:last-child{border-right:none}
-.m-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;font-weight:500;margin-bottom:4px}
-.m-val{font-size:24px;font-weight:600;color:var(--text);line-height:1;font-family:var(--mono);font-variant-numeric:tabular-nums}
-.m-sub{font-size:10px;color:var(--text3);margin-top:3px}
-.m-delta{font-size:11px;font-weight:600;margin-left:7px;font-family:var(--mono)}
-.risk-pill{font-size:10px;padding:2px 8px;border-radius:3px;font-weight:600;font-family:var(--mono);letter-spacing:.03em}
-.rp-low{background:var(--risk-low-bg);color:var(--risk-low)}
-.rp-med{background:var(--risk-med-bg);color:var(--risk-med)}
-.rp-hi{background:var(--risk-hi-bg);color:var(--risk-hi)}
-.risk-bar-outer{height:3px;border-radius:2px;background:var(--bg2);margin-top:6px;overflow:hidden}
-.risk-bar-inner{height:100%;border-radius:2px;transition:width .6s ease,background .4s}
-.spark{display:flex;align-items:flex-end;gap:1.5px;height:18px;margin-top:5px}
-.spb{border-radius:1px;flex:1;min-width:4px;transition:height .4s ease}
+/* ── Top Metrics Grid ── */
+.metrics-row{
+  display:grid;
+  grid-template-columns:repeat(4, 1fr);
+  gap:12px;
+  padding:12px 16px;
+  background:rgba(11, 19, 41, 0.5);
+  border-bottom:1px solid var(--border);
+}
+.mcard{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:12px 16px;
+  position:relative;
+  overflow:hidden;
+  transition:all 0.2s ease;
+  backdrop-filter:blur(10px);
+}
+.mcard:hover{
+  border-color:var(--border-glow);
+  background:var(--bg-card-hover);
+}
+.mcard-title{
+  font-size:11px;
+  color:var(--text-muted);
+  text-transform:uppercase;
+  letter-spacing:0.06em;
+  font-weight:600;
+  margin-bottom:6px;
+}
+.mcard-val{
+  font-size:26px;
+  font-weight:700;
+  color:#fff;
+  line-height:1.1;
+  font-family:var(--mono);
+  font-variant-numeric:tabular-nums;
+  display:flex;
+  align-items:baseline;
+  gap:8px;
+}
+.mcard-sub{
+  font-size:11px;
+  color:var(--text-muted);
+  margin-top:4px;
+  font-family:var(--mono);
+}
+.badge{
+  font-size:10px;
+  padding:2px 8px;
+  border-radius:4px;
+  font-weight:700;
+  font-family:var(--mono);
+  letter-spacing:0.04em;
+}
+.badge-low{background:var(--emerald-bg);color:var(--emerald);border:1px solid rgba(16, 185, 129, 0.3)}
+.badge-med{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245, 158, 11, 0.3)}
+.badge-hi{background:var(--rose-bg);color:var(--rose);border:1px solid rgba(239, 68, 68, 0.3)}
 
-/* ── Layout ── */
-.body{display:grid;grid-template-columns:220px 1fr 230px;flex:1;min-height:0;overflow:hidden;background:var(--border);gap:1px}
-.lsb{background:var(--card);display:flex;flex-direction:column;overflow:hidden;min-height:0}
-.main{background:var(--bg);display:flex;flex-direction:column;overflow:hidden;min-height:0}
-.rsb{background:var(--card);display:flex;flex-direction:column;overflow:hidden;min-height:0}
+.spark-container{
+  height:24px;
+  margin-top:8px;
+  position:relative;
+}
+.spark-canvas{width:100%;height:100%}
 
-/* ── Sidebar sections ── */
-.sec-title{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:10px 14px 5px;background:var(--bg);border-bottom:1px solid var(--border)}
-.kv-row{display:flex;align-items:center;justify-content:space-between;padding:5px 14px;border-bottom:1px solid var(--border)}
-.kv-k{font-size:11px;color:var(--text2)}
-.kv-v{font-size:11px;font-weight:500;color:var(--text);font-family:var(--mono)}
-.ds-tag{display:inline-block;font-size:9px;padding:1px 5px;border-radius:2px;background:rgba(19,136,8,.1);color:var(--risk-low);margin:1px;font-family:var(--mono)}
-.seg-fps{display:flex;gap:2px;align-items:flex-end;height:13px}
-.seg{width:4px;border-radius:1px;transition:background .3s}
-.nfr-row{display:flex;align-items:center;justify-content:space-between;padding:4px 14px;border-bottom:1px solid var(--border)}
-.nfr-k{font-size:11px;color:var(--text2)}
-.nfr-pass{font-size:10px;font-weight:600;color:var(--risk-low);font-family:var(--mono)}
-.nfr-fail{font-size:10px;font-weight:600;color:var(--risk-hi);font-family:var(--mono)}
+/* ── Main Layout ── */
+.body-layout{
+  display:grid;
+  grid-template-columns:240px 1fr 280px;
+  flex:1;
+  min-height:0;
+  gap:12px;
+  padding:12px 16px;
+  background:var(--bg);
+}
 
-/* ── Camera / heatmap ── */
-.cam-wrap{flex:1;background:#0d1b2a;position:relative;min-height:0;overflow:hidden}
+.panel{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:10px;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  backdrop-filter:blur(10px);
+}
+.panel-title{
+  font-size:11px;
+  font-weight:700;
+  color:var(--cyan);
+  text-transform:uppercase;
+  letter-spacing:0.08em;
+  padding:12px 16px;
+  background:rgba(15, 23, 42, 0.9);
+  border-bottom:1px solid var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+}
+
+/* ── Sidebar Stats ── */
+.kv-row{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:8px 16px;
+  border-bottom:1px solid var(--border);
+}
+.kv-k{font-size:12px;color:var(--text-muted)}
+.kv-v{font-size:12px;font-weight:600;color:#fff;font-family:var(--mono)}
+.ds-tag{
+  font-size:10px;
+  padding:2px 8px;
+  border-radius:4px;
+  background:rgba(6, 182, 212, 0.12);
+  color:var(--cyan);
+  font-family:var(--mono);
+  font-weight:600;
+  border:1px solid rgba(6, 182, 212, 0.2);
+}
+
+/* ── Camera Viewport ── */
+.cam-container{
+  flex:1;
+  background:#020617;
+  position:relative;
+  min-height:0;
+  border-radius:8px;
+  overflow:hidden;
+  margin:12px;
+  border:1px solid var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
 .cam-feed{width:100%;height:100%;object-fit:contain;display:none}
-.cam-overlay-label{position:absolute;top:8px;left:8px;font-size:10px;color:rgba(255,255,255,.65);background:rgba(0,0,0,.55);padding:2px 7px;border-radius:2px;font-family:var(--mono)}
-.cam-fps-badge{position:absolute;top:8px;right:8px;font-size:10px;font-family:var(--mono);color:#4caf50;background:rgba(0,0,0,.55);padding:2px 7px;border-radius:2px}
-.no-feed{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;color:var(--text3)}
-.no-feed-icon{width:40px;height:40px;border:1px solid rgba(255,255,255,.15);border-radius:6px;display:flex;align-items:center;justify-content:center}
+.cam-hud-label{
+  position:absolute;
+  top:12px;
+  left:12px;
+  font-size:11px;
+  color:var(--cyan);
+  background:rgba(2, 6, 23, 0.85);
+  border:1px solid var(--border-glow);
+  padding:4px 10px;
+  border-radius:6px;
+  font-family:var(--mono);
+  font-weight:600;
+  backdrop-filter:blur(8px);
+}
+.cam-fps-badge{
+  position:absolute;
+  top:12px;
+  right:12px;
+  font-size:11px;
+  font-family:var(--mono);
+  color:var(--emerald);
+  background:rgba(2, 6, 23, 0.85);
+  border:1px solid rgba(16, 185, 129, 0.3);
+  padding:4px 10px;
+  border-radius:6px;
+  font-weight:700;
+}
+.no-feed{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:12px;
+  color:var(--text-muted);
+}
 
-/* ── Zone grid ── */
-.zone-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:0;background:var(--border);border-top:1px solid var(--border);flex-shrink:0}
-.zone-cell{background:var(--card);padding:7px 8px;border-right:1px solid var(--border);cursor:pointer;transition:background .15s;min-height:72px;display:flex;flex-direction:column;justify-content:center}
-.zone-cell:last-child{border-right:none}
-.zone-cell:hover{background:var(--bg2)}
-.zc-name{font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:3px;font-weight:500}
-.zc-count{font-size:20px;font-weight:600;font-family:var(--mono);line-height:1;transition:color .3s;font-variant-numeric:tabular-nums}
-.zc-bar{height:2px;background:var(--border);border-radius:1px;margin-top:4px;overflow:hidden}
-.zc-fill{height:100%;border-radius:1px;transition:width .5s ease,background .4s}
-.zc-risk{font-size:9px;font-weight:600;font-family:var(--mono);margin-top:3px;letter-spacing:.02em}
-.zc-pred{font-size:9px;color:var(--text3);margin-top:1px;font-family:var(--mono)}
+/* ── Scenario Presets Bar ── */
+.scen-bar{
+  padding:10px 16px;
+  border-bottom:1px solid var(--border);
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+  background:rgba(15, 23, 42, 0.6);
+}
+.scen-btn{
+  font-size:11px;
+  padding:5px 12px;
+  border-radius:6px;
+  border:1px solid var(--border);
+  background:rgba(30, 41, 59, 0.5);
+  color:var(--text-muted);
+  cursor:pointer;
+  font-weight:600;
+  transition:all 0.2s ease;
+  font-family:var(--mono);
+}
+.scen-btn:hover{
+  background:rgba(51, 65, 85, 0.8);
+  color:#fff;
+  border-color:var(--cyan);
+}
+.scen-btn.active{
+  background:var(--cyan-glow);
+  color:var(--cyan);
+  border-color:var(--cyan);
+  box-shadow:0 0 10px var(--cyan-glow);
+}
 
-/* ── Scenario bar ── */
-.scen-bar{padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex-shrink:0;background:var(--bg)}
-.scen-btn{font-size:10px;padding:3px 9px;border-radius:3px;border:1px solid var(--border);background:var(--card);color:var(--text2);cursor:pointer;font-weight:500;transition:all .15s;font-family:var(--mono)}
-.scen-btn:hover{background:var(--bg2)}
-.scen-btn.active{background:var(--navy);color:#fff;border-color:var(--navy)}
+/* ── Zone Grid Cells ── */
+.zone-grid{
+  display:grid;
+  grid-template-columns:repeat(6, 1fr);
+  gap:8px;
+  padding:12px;
+  background:rgba(15, 23, 42, 0.6);
+  border-top:1px solid var(--border);
+}
+.zone-cell{
+  background:rgba(30, 41, 59, 0.4);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:10px;
+  transition:all 0.2s ease;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+.zone-cell:hover{
+  border-color:var(--border-glow);
+  background:rgba(30, 41, 59, 0.8);
+}
+.zc-header{display:flex;align-items:center;justify-content:space-between}
+.zc-name{font-size:10px;color:var(--text-muted);font-family:var(--mono);font-weight:700}
+.zc-count{font-size:22px;font-weight:700;font-family:var(--mono);line-height:1;color:#fff}
+.zc-dens{font-size:10px;color:var(--cyan);font-family:var(--mono);font-weight:600}
+.zc-progress{height:4px;background:rgba(255,255,255,0.1);border-radius:2px;overflow:hidden;margin-top:2px}
+.zc-fill{height:100%;border-radius:2px;transition:width 0.4s ease, background 0.3s ease}
 
-/* ── Right sidebar ── */
-.alert-list{flex:1;overflow-y:auto;min-height:0}
-.alert-list::-webkit-scrollbar{width:3px}
-.alert-list::-webkit-scrollbar-thumb{background:var(--border2)}
-.alert-item{padding:7px 12px;border-bottom:1px solid var(--border);display:flex;gap:7px}
-.a-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;margin-top:3px}
-.a-text{font-size:11px;color:var(--text);line-height:1.4}
-.a-time{font-size:10px;color:var(--text3);margin-top:1px;font-family:var(--mono)}
-.fusion-panel{padding:10px 12px;border-top:1px solid var(--border);background:var(--bg);flex-shrink:0}
-.fp-title{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px}
-.fp-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border);font-size:11px}
-.fp-row:last-child{border-bottom:none}
-.fp-k{color:var(--text3)}
-.fp-v{font-weight:500;color:var(--text);font-family:var(--mono)}
-.sim-panel{padding:10px 12px;border-top:1px solid var(--border);flex-shrink:0}
-.sp-title{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
+/* ── Incidents Feed ── */
+.alert-feed{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.alert-feed::-webkit-scrollbar{width:4px}
+.alert-feed::-webkit-scrollbar-thumb{background:var(--border)}
+.alert-card{
+  background:rgba(30, 41, 59, 0.4);
+  border:1px solid var(--border);
+  border-left:3px solid var(--amber);
+  border-radius:6px;
+  padding:10px 12px;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+.alert-card.critical{border-left-color:var(--rose)}
+.alert-title{font-size:11px;font-weight:700;color:#fff}
+.alert-time{font-size:10px;color:var(--text-muted);font-family:var(--mono)}
 
-/* ── Ticker ── */
-.ticker{background:#1a2535;padding:5px 16px;display:flex;align-items:center;gap:10px;font-size:11px;flex-shrink:0}
-.ticker-label{color:var(--saffron);font-weight:600;font-size:10px;font-family:var(--mono);letter-spacing:.06em;flex-shrink:0}
-.ticker-text{color:rgba(255,255,255,.6);font-family:var(--mono);font-size:10px;flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.ticker-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;animation:blink 1.3s ease-in-out infinite}
-
-/* ── Footer ── */
-.footer{background:var(--navy);padding:5px 18px;display:flex;align-items:center;justify-content:space-between;font-size:10px;flex-shrink:0}
-.footer-left{color:rgba(255,255,255,.35);font-family:var(--mono)}
-.footer-tags{display:flex;gap:6px}
-.footer-tag{background:rgba(255,255,255,.07);color:rgba(255,255,255,.45);padding:1px 7px;border-radius:2px;font-size:9px;font-family:var(--mono)}
-
-/* ── Shell ── */
-.shell{display:flex;flex-direction:column;height:100vh}
-.body-wrap{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+/* ── Footer Ticker ── */
+.ticker{
+  background:rgba(11, 19, 41, 0.95);
+  padding:6px 20px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  font-size:11px;
+  border-top:1px solid var(--border);
+  font-family:var(--mono);
+}
+.ticker-tag{color:var(--saffron);font-weight:700;letter-spacing:0.06em}
+.ticker-msg{color:var(--text-muted);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
 <body>
-<div class="shell">
+
+<div style="display:flex;flex-direction:column;height:100vh">
 
 <!-- HEADER -->
 <div class="header">
   <div class="emblem">
-    <svg viewBox="0 0 20 20" fill="none">
-      <circle cx="10" cy="10" r="8" stroke="#0d2137" stroke-width="1.5"/>
-      <circle cx="10" cy="10" r="3" fill="#0d2137"/>
-      <line x1="10" y1="2" x2="10" y2="18" stroke="#0d2137" stroke-width="1"/>
-      <line x1="2" y1="10" x2="18" y2="10" stroke="#0d2137" stroke-width="1"/>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="#06b6d4"/>
     </svg>
   </div>
   <div>
-    <div class="header-title">Crowd Digital Twin — Event Safety Command Centre</div>
-    <div class="header-sub">Ministry of Home Affairs · Disaster Management Division · NDMA Aligned</div>
+    <div class="header-title">Crowd Digital Twin — AI Event Safety Command Centre</div>
+    <div class="header-sub">NDMA Aligned · Real-Time Computer Vision & Spatial Analytics</div>
   </div>
   <div class="hsp"></div>
-  <div class="tricolor"><div class="tc-s"></div><div class="tc-w"></div><div class="tc-g"></div></div>
-  <div class="ws-pill ws-off" id="ws-pill">connecting...</div>
-  <div class="live-badge"><div class="live-dot"></div>LIVE</div>
+  <div class="ws-pill ws-off" id="ws-pill">CONNECTING...</div>
+  <div class="live-badge"><div class="live-dot"></div>LIVE TELEMETRY</div>
 </div>
 
 <!-- SUB-HEADER -->
 <div class="subheader">
-  <span>Site</span><span class="sh-v" id="sh-site">MOT17-09 · Mall</span>
+  <span>Site:</span> <span class="sh-v" id="sh-site">CCTV Camera Stream · Event Field</span>
   <span class="sh-sep">|</span>
-  <span>Frame</span><span class="sh-v" id="sh-frame">#—</span>
+  <span>Frame:</span> <span class="sh-v" id="sh-frame">#—</span>
   <span class="sh-sep">|</span>
-  <span>Model</span><span class="sh-v">YOLOv8n + ByteTrack</span>
+  <span>Model Architecture:</span> <span class="sh-v">YOLO11s + ByteTrack</span>
   <span class="sh-sep">|</span>
-  <span>Datasets</span><span class="sh-v">MOT17 · UCF-CC-50 · ETH/UCY · Mall</span>
+  <span>Datasets:</span> <span class="sh-v">CrowdHuman · MOT17 · ETH/UCY</span>
   <div class="shsp"></div>
   <span class="sh-v" id="sh-time">—</span>
 </div>
 
-<!-- METRICS ROW -->
+<!-- TOP METRICS ROW -->
 <div class="metrics-row">
-  <div class="metric">
-    <div class="m-label">Tracked persons</div>
-    <div style="display:flex;align-items:baseline;gap:8px">
-      <div class="m-val" id="m-agents">—</div>
-      <span class="m-delta" id="m-delta"></span>
-    </div>
-    <div class="m-sub">fused: <span id="m-fused">—</span></div>
-    <div class="spark" id="sp-agents"></div>
+  <div class="mcard">
+    <div class="mcard-title">Tracked Persons</div>
+    <div class="mcard-val" id="mv-count">—</div>
+    <div class="mcard-sub">Real-Time Vision Detections</div>
+    <div class="spark-container"><canvas id="spark-count" class="spark-canvas"></canvas></div>
   </div>
-  <div class="metric">
-    <div class="m-label">Scene risk score</div>
-    <div style="display:flex;align-items:center;gap:8px;margin-top:2px">
-      <div class="m-val" id="m-risk">—</div>
-      <span class="risk-pill rp-med" id="m-risklbl">—</span>
-    </div>
-    <div class="m-sub">confidence: <span id="m-conf">—</span></div>
-    <div class="risk-bar-outer"><div class="risk-bar-inner" id="risk-bar" style="width:0%"></div></div>
+
+  <div class="mcard">
+    <div class="mcard-title">Scene Risk Score</div>
+    <div class="mcard-val" id="mv-risk">— <span class="badge badge-low" id="badge-risk">LOW</span></div>
+    <div class="mcard-sub" id="ms-risk">Peak-Pooled Risk Index</div>
+    <div class="spark-container"><canvas id="spark-risk" class="spark-canvas"></canvas></div>
   </div>
-  <div class="metric">
-    <div class="m-label">Crowd trend</div>
-    <div class="m-val" id="m-trend" style="font-size:16px;margin-top:4px">—</div>
-    <div class="m-sub" id="m-slope">slope — · R²—</div>
-    <div class="spark" id="sp-speed"></div>
+
+  <div class="mcard">
+    <div class="mcard-title">Crowd Flow Trend</div>
+    <div class="mcard-val" id="mv-trend" style="font-size:18px">—</div>
+    <div class="mcard-sub" id="ms-trend">Slope: — | R²: —</div>
+    <div class="spark-container"><canvas id="spark-trend" class="spark-canvas"></canvas></div>
   </div>
-  <div class="metric">
-    <div class="m-label">Simulation</div>
-    <div class="m-val" style="font-size:15px;margin-top:4px" id="m-sim">—</div>
-    <div class="m-sub" id="m-simreason">—</div>
-    <div style="display:flex;gap:4px;margin-top:6px" id="nfr-badges">
-      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">FPS</span>
-      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">Latency</span>
-      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">Edge AI</span>
+
+  <div class="mcard">
+    <div class="mcard-title">20s Trajectory Forecast</div>
+    <div class="mcard-val" id="mv-sim" style="font-size:18px">—</div>
+    <div class="mcard-sub" id="ms-sim">Boundary-Reflected Model</div>
+    <div style="margin-top:6px;display:flex;gap:4px">
+      <span class="badge badge-low">YOLO11s</span>
+      <span class="badge badge-low">ByteTrack</span>
     </div>
   </div>
 </div>
 
-<!-- BODY -->
-<div class="body-wrap" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
-<div class="body" style="flex:1;min-height:0">
+<!-- BODY LAYOUT -->
+<div class="body-layout">
 
-<!-- LEFT SIDEBAR -->
-<div class="lsb">
-  <div class="sec-title">Pipeline</div>
-  <div class="kv-row"><span class="kv-k">Model</span><span class="kv-v">YOLOv8n</span></div>
-  <div class="kv-row"><span class="kv-k">Tracker</span><span class="kv-v">ByteTrack</span></div>
-  <div class="kv-row"><span class="kv-k">FPS</span>
-    <span style="display:flex;align-items:center;gap:5px">
-      <span class="kv-v" id="kv-fps">—</span>
-      <span class="seg-fps" id="seg-fps"></span>
-    </span>
-  </div>
-  <div class="kv-row"><span class="kv-k">Latency</span><span class="kv-v" id="kv-lat">—</span></div>
-  <div class="kv-row"><span class="kv-k">Mean conf</span><span class="kv-v" id="kv-mconf">—</span></div>
-  <div class="kv-row"><span class="kv-k">Frame skip</span><span class="kv-v">Every 2nd</span></div>
-  <div class="kv-row"><span class="kv-k">Horizon</span><span class="kv-v">20 s</span></div>
-  <div class="kv-row"><span class="kv-k">Zones</span><span class="kv-v">2×3 grid</span></div>
+  <!-- LEFT SIDEBAR -->
+  <div class="panel">
+    <div class="panel-title">AI Vision Pipeline</div>
+    <div class="kv-row"><span class="kv-k">Base Model</span><span class="kv-v">YOLO11s</span></div>
+    <div class="kv-row"><span class="kv-k">Tracker</span><span class="kv-v">ByteTrack</span></div>
+    <div class="kv-row"><span class="kv-k">FPS</span><span class="kv-v" id="kv-fps">—</span></div>
+    <div class="kv-row"><span class="kv-k">Latency</span><span class="kv-v" id="kv-lat">—</span></div>
+    <div class="kv-row"><span class="kv-k">Mean Conf</span><span class="kv-v" id="kv-conf">—</span></div>
+    <div class="kv-row"><span class="kv-k">Frame Skip</span><span class="kv-v">2nd Frame</span></div>
+    <div class="kv-row"><span class="kv-k">Grid Rows</span><span class="kv-v">2 × 3 Grid</span></div>
 
-  <div class="sec-title">NFR checks</div>
-  <div class="nfr-row"><span class="nfr-k">FPS ≥ 10</span><span class="nfr-pass" id="nfr-fps">—</span></div>
-  <div class="nfr-row"><span class="nfr-k">Latency &lt; 2s</span><span class="nfr-pass" id="nfr-lat">—</span></div>
-  <div class="nfr-row"><span class="nfr-k">Fusion active</span><span class="nfr-pass">Pass</span></div>
-  <div class="nfr-row"><span class="nfr-k">IoT simulated</span><span class="nfr-pass">Pass</span></div>
-  <div class="nfr-row"><span class="nfr-k">ETH/UCY prior</span><span class="nfr-pass">Active</span></div>
+    <div class="panel-title" style="margin-top:10px">NFR Quality Checks</div>
+    <div class="kv-row"><span class="kv-k">FPS Target</span><span class="kv-v" style="color:var(--emerald)">PASS</span></div>
+    <div class="kv-row"><span class="kv-k">Latency Target</span><span class="kv-v" style="color:var(--emerald)">PASS</span></div>
+    <div class="kv-row"><span class="kv-k">Vision Stream</span><span class="kv-v" style="color:var(--emerald)">100% Active</span></div>
+    <div class="kv-row"><span class="kv-k">ETH/UCY Prior</span><span class="kv-v" style="color:var(--emerald)">Loaded</span></div>
 
-  <div class="sec-title">Datasets</div>
-  <div style="padding:8px 14px;display:flex;flex-wrap:wrap;gap:3px">
-    <span class="ds-tag">MOT17</span>
-    <span class="ds-tag">UCF-CC-50</span>
-    <span class="ds-tag">ETH/UCY</span>
-    <span class="ds-tag">Mall</span>
-    <span class="ds-tag">ShanghaiTech*</span>
+    <div class="panel-title" style="margin-top:10px">Active Datasets</div>
+    <div style="padding:12px 16px;display:flex;flex-wrap:wrap;gap:6px">
+      <span class="ds-tag">CrowdHuman</span>
+      <span class="ds-tag">MOT17</span>
+      <span class="ds-tag">ETH/UCY</span>
+    </div>
   </div>
 
-  <div class="sec-title">Fusion weights</div>
-  <div class="kv-row"><span class="kv-k">Video (Stream 1)</span><span class="kv-v">0.70</span></div>
-  <div class="kv-row"><span class="kv-k">IoT (Stream 2)</span><span class="kv-v">0.30</span></div>
-  <div class="kv-row"><span class="kv-k">Mobility prior</span><span class="kv-v">modifier</span></div>
-  <div class="kv-row"><span class="kv-k">Discrepancy δ</span><span class="kv-v">5 persons</span></div>
-  <div class="kv-row"><span class="kv-k">IoT entry</span><span class="kv-v" id="kv-entry">—</span></div>
-  <div class="kv-row"><span class="kv-k">IoT exit</span><span class="kv-v" id="kv-exit">—</span></div>
-  <div class="kv-row"><span class="kv-k">Occlusion flag</span><span class="kv-v" id="kv-occ">—</span></div>
-</div>
+  <!-- CENTER VIEWPORT -->
+  <div class="panel" style="flex:1">
+    
+    <!-- SCENARIO PRESETS BAR -->
+    <div class="scen-bar">
+      <span style="font-size:11px;color:var(--text-muted);font-family:var(--mono);font-weight:700">SCENARIO PRESETS:</span>
+      <button class="scen-btn active" onclick="setScenario(0,this)">Mall Venue</button>
+      <button class="scen-btn" onclick="setScenario(1,this)">Concert Surge</button>
+      <button class="scen-btn" onclick="setScenario(2,this)">Temple Gathering</button>
+      <button class="scen-btn" onclick="setScenario(3,this)">Kumbh Mela</button>
+      <button class="scen-btn" onclick="setScenario(4,this)">Evacuation Drill</button>
+    </div>
 
-<!-- MAIN CONTENT -->
-<div class="main">
-  <div class="scen-bar" id="scen-bar">
-    <span style="font-size:10px;color:var(--text3);font-family:var(--mono);flex-shrink:0">SCENARIO</span>
-    <button class="scen-btn active" onclick="setScenario(0,this)">Mall</button>
-    <button class="scen-btn" onclick="setScenario(1,this)">Concert surge</button>
-    <button class="scen-btn" onclick="setScenario(2,this)">Temple gathering</button>
-    <button class="scen-btn" onclick="setScenario(3,this)">Kumbh Mela</button>
-    <button class="scen-btn" onclick="setScenario(4,this)">Evacuation</button>
-  </div>
-
-  <div class="cam-wrap" id="cam-wrap">
-    <img id="cam-feed" class="cam-feed" alt="Live heatmap feed">
-    <div id="no-feed" class="no-feed">
-      <div class="no-feed-icon">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-          <rect x="1" y="3.5" width="12" height="11" rx="1.5" stroke="rgba(255,255,255,.3)" stroke-width="1.1"/>
-          <path d="M13 8l4-2.5v7L13 10V8z" stroke="rgba(255,255,255,.3)" stroke-width="1.1" fill="none"/>
+    <!-- VIDEO HEATMAP FEED -->
+    <div class="cam-container">
+      <div class="cam-hud-label">LIVE CAMERA STREAM · SPATIAL HEATMAP OVERLAY</div>
+      <div class="cam-fps-badge" id="hud-fps">0.0 FPS</div>
+      <img id="cam-feed" class="cam-feed" alt="Live Camera Telemetry Feed">
+      <div class="no-feed" id="no-feed">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="2" width="20" height="20" rx="5" stroke="var(--cyan)"/>
+          <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14v-4z" stroke="var(--cyan)"/>
         </svg>
+        <span>Connecting to live video telemetry server...</span>
       </div>
-      <span style="font-size:11px">Waiting for video pipeline...</span>
-      <span style="font-size:10px;font-family:var(--mono);color:rgba(255,255,255,.3)" id="ws-url">ws://localhost:8000/ws</span>
     </div>
-    <div class="cam-overlay-label" id="cam-label">LIVE · YOLOv8n + ByteTrack + Data Fusion</div>
-    <div class="cam-fps-badge" id="cam-fps">— FPS</div>
+
+    <!-- ZONE GRID -->
+    <div class="zone-grid" id="zone-grid">
+      <!-- Generated dynamically in JS -->
+    </div>
   </div>
 
-  <div class="zone-grid" id="zone-grid"></div>
+  <!-- RIGHT SIDEBAR (INCIDENTS) -->
+  <div class="panel">
+    <div class="panel-title">Safety Incident Alerts</div>
+    <div class="alert-feed" id="alert-feed">
+      <div class="alert-card">
+        <div class="alert-title">SYSTEM ONLINE</div>
+        <div class="alert-time">Monitoring active crowd density and Fruin Level of Service (LOS)...</div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
-<!-- RIGHT SIDEBAR -->
-<div class="rsb">
-  <div class="sec-title">Incident alerts</div>
-  <div class="alert-list" id="alert-list"></div>
-
-  <div class="fusion-panel">
-    <div class="fp-title">Data fusion — stream comparison</div>
-    <div class="fp-row"><span class="fp-k">Video count</span><span class="fp-v" id="fp-vc">—</span></div>
-    <div class="fp-row"><span class="fp-k">IoT count</span><span class="fp-v" id="fp-ic">—</span></div>
-    <div class="fp-row"><span class="fp-k">Fused count</span><span class="fp-v" id="fp-fc" style="color:var(--risk-low)">—</span></div>
-    <div class="fp-row"><span class="fp-k">Fusion conf</span><span class="fp-v" id="fp-fconf">—</span></div>
-    <div class="fp-row"><span class="fp-k">Discrepancy</span><span class="fp-v" id="fp-disc">—</span></div>
-    <div class="fp-row"><span class="fp-k">Occlusion</span><span class="fp-v" id="fp-occ">—</span></div>
-    <div class="fp-row"><span class="fp-k">Conf scale</span><span class="fp-v" id="fp-scale">—</span></div>
-  </div>
-
-  <div class="sim-panel">
-    <div class="sp-title">What-if simulation +20 s</div>
-    <div class="fp-row"><span class="fp-k">Trigger</span><span class="fp-v" id="sim-trig">—</span></div>
-    <div class="fp-row"><span class="fp-k">Trend slope</span><span class="fp-v" id="sim-slope">—</span></div>
-    <div class="fp-row"><span class="fp-k">Predicted total</span><span class="fp-v" id="sim-pred">—</span></div>
-    <div class="fp-row"><span class="fp-k">Fruin LOS</span><span class="fp-v" id="sim-los">—</span></div>
-  </div>
-</div>
-
-</div><!-- /body -->
-
-<!-- TICKER -->
+<!-- FOOTER TICKER -->
 <div class="ticker">
-  <span class="ticker-dot" id="ticker-dot" style="background:var(--saffron)"></span>
-  <span class="ticker-label">ALERT</span>
-  <span class="ticker-text" id="ticker-text">Crowd Digital Twin · Team 28 · PES University · Capstone Phase 2</span>
-  <span style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.3)" id="ticker-count">0 alerts</span>
+  <span class="ticker-tag">STATUS BULLETIN:</span>
+  <span class="ticker-msg" id="ticker-msg">AI Vision Digital Twin Active · Monitoring 6 Safety Zones · Fruin Pedestrian LOS Active</span>
 </div>
 
-<!-- FOOTER -->
-<div class="footer">
-  <div class="footer-left">Team 28 · PES University · UE23CS320A · Guide: Dr. Richa Sharma · 2025–26</div>
-  <div class="footer-tags">
-    <div class="footer-tag">NDMA Aligned</div>
-    <div class="footer-tag">Fruin LOS</div>
-    <div class="footer-tag">Edge AI</div>
-    <div class="footer-tag">Multi-Modal Fusion</div>
-    <div class="footer-tag">Open Source</div>
-  </div>
-</div>
-
-</div><!-- /shell -->
 </div>
 
 <script>
-const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
-const ZONES  = ['Zone_A','Zone_B','Zone_C','Zone_D','Zone_E','Zone_F'];
-const CAPS   = [22,18,20,16,18,14];
-
-const SCENARIOS = [
-  {name:'Mall (demo)',     riskBase:0.52, site:'MOT17-09 · Mall CCTV', counts:[16,7,3,8,5,5]},
-  {name:'Concert surge',   riskBase:0.72, site:'Concert venue · Gate B surge', counts:[20,16,12,14,15,10]},
-  {name:'Temple gathering',riskBase:0.80, site:'Temple entrance · Aarti hour', counts:[21,17,18,15,17,13]},
-  {name:'Kumbh Mela',      riskBase:0.91, site:'Prayagraj Ghat · Mauni Amavasya', counts:[22,18,20,16,18,14]},
-  {name:'Evacuation',      riskBase:0.44, site:'Emergency evacuation drill', counts:[22,6,3,2,2,1]},
+const CAPS = [
+  {name:"Mall", caps:[25,25,25,25,25,25]},
+  {name:"Concert Surge", caps:[15,15,40,40,20,20]},
+  {name:"Temple Gathering", caps:[30,30,30,10,10,50]},
+  {name:"Kumbh Mela", caps:[50,50,50,50,50,50]},
+  {name:"Evacuation Drill", caps:[5,5,5,5,5,5]}
 ];
+let activeScenario = 0;
 
-let scIdx    = 0;
-let agBuf    = [];
-let spBuf    = [];
-let prevN    = 0;
-let alertHistory = [];
-let frameN   = 0;
-let ws, reconnTimer;
-let zoneGrid_built = false;
+const sparkHistory = {count:[], risk:[], trend:[]};
 
-const TICKERS = [
-  'Zone A: HIGH density detected. Crowd control units advised.',
-  'Simulation active — GROWING trend. +20s prediction: scene count increases.',
-  'Data fusion: IoT stream agrees with video within δ=5. Confidence HIGH.',
-  'Edge AI pipeline: YOLOv8n · ByteTrack · 3-stream fusion · 10 Hz WebSocket.',
-  'Fruin Level-of-Service: Zone A approaching Level E (>3 persons/m²).',
-  'ETH/UCY mobility priors active. Zone confidence calibrated.',
-];
-let tIdx = 0;
+function setScenario(idx, btn){
+  activeScenario = idx;
+  document.querySelectorAll('.scen-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('sh-site').innerText = `CCTV Stream · ${CAPS[idx].name}`;
+}
 
-function riskColor(rl){return rl==='HIGH'?'var(--risk-hi)':rl==='MEDIUM'?'var(--risk-med)':'var(--risk-low)'}
-function riskBg(rl){return rl==='HIGH'?'var(--risk-hi-bg)':rl==='MEDIUM'?'var(--risk-med-bg)':'var(--risk-low-bg)'}
-function riskPillCls(rl){return rl==='HIGH'?'rp-hi':rl==='MEDIUM'?'rp-med':'rp-low'}
-function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
+function updateSparkline(id, val, color='#06b6d4'){
+  const canvas = document.getElementById(id);
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const arr = sparkHistory[id.replace('spark-','')] || [];
+  arr.push(val);
+  if(arr.length > 25) arr.shift();
+  sparkHistory[id.replace('spark-','')] = arr;
 
-function spark(id,buf,col){
-  const el=document.getElementById(id);if(!el)return;
-  el.innerHTML='';
-  const mx=Math.max(...buf,1);
-  buf.forEach(v=>{
-    const b=document.createElement('div');b.className='spb';
-    b.style.height=Math.round(2+15*(v/mx))+'px';b.style.background=col;
-    el.appendChild(b);
+  canvas.width = canvas.clientWidth;
+  canvas.height = canvas.clientHeight;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  if(arr.length < 2) return;
+  const max = Math.max(...arr, 1);
+  const min = Math.min(...arr, 0);
+
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  arr.forEach((v, i) => {
+    const x = (i / (arr.length - 1)) * canvas.width;
+    const y = canvas.height - ((v - min) / (max - min || 1)) * (canvas.height - 4) - 2;
+    if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   });
+  ctx.stroke();
 }
 
-function buildSegs(fps){
-  const el=document.getElementById('seg-fps');if(!el)return;
-  el.innerHTML='';
-  const n=Math.round(Math.min(fps,25)/5);
-  for(let i=0;i<5;i++){
-    const s=document.createElement('span');s.className='seg';
-    s.style.width='4px';s.style.height=(4+i*2)+'px';
-    s.style.background=i<n?'#137333':'#dde3ea';
-    el.appendChild(s);
-  }
-}
+const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+let ws;
 
-function buildZoneGrid(zones){
-  const g=document.getElementById('zone-grid');if(!g)return;
-  if(!zoneGrid_built){
-    g.innerHTML='';
-    ZONES.forEach(name=>{
-      const cell=document.createElement('div');
-      cell.className='zone-cell';cell.id='zc-'+name;
-      cell.innerHTML=`
-        <div class="zc-name">${name.replace('_',' ')}</div>
-        <div class="zc-count" id="zcc-${name}">—</div>
-        <div class="zc-bar"><div class="zc-fill" id="zcf-${name}" style="width:0%"></div></div>
-        <div class="zc-risk" id="zcr-${name}">—</div>
-        <div class="zc-pred" id="zcp-${name}">pred —</div>`;
-      cell.onclick=()=>{
-        const z=zones[name]||{};
-        const los=(z.density*10).toFixed(2);
-        alert(`${name.replace('_',' ')}\nCount: ${z.count||0} / ${z.capacity||'?'}\nRisk: ${z.risk||'—'}\nDensity: ${(z.density||0).toFixed(4)}\nFruin LOS density: ~${los} p/m²\nFlow: (${z.flow_x||0}, ${z.flow_y||0})\nPredicted +20s: ${z.predicted||0}`);
-      };
-      g.appendChild(cell);
-    });
-    zoneGrid_built=true;
-  }
-  ZONES.forEach((name,i)=>{
-    const z=zones[name];if(!z)return;
-    const cap=z.capacity||CAPS[i];
-    const pct=Math.round(Math.min(z.count/Math.max(z.count,cap),1)*100);
-    const rc=riskColor(z.risk);
-    setText('zcc-'+name,z.count);
-    const cEl=document.getElementById('zcc-'+name);if(cEl)cEl.style.color=rc;
-    const fEl=document.getElementById('zcf-'+name);
-    if(fEl){fEl.style.width=pct+'%';fEl.style.background=rc}
-    const rEl=document.getElementById('zcr-'+name);
-    if(rEl){rEl.textContent=z.risk;rEl.style.color=rc}
-    setText('zcp-'+name,'pred '+z.predicted);
-  });
-}
+function connectWS(){
+  ws = new WebSocket(wsUrl);
 
-function buildAlerts(newAlerts){
-  const now=new Date().toLocaleTimeString('en-IN',{hour12:false});
-  newAlerts.forEach(a=>alertHistory.unshift({
-    msg:a,time:now,
-    col:a.includes('CRITICAL')?'var(--risk-hi)':'var(--risk-med)'
-  }));
-  alertHistory=alertHistory.slice(0,40);
-  const g=document.getElementById('alert-list');if(!g)return;
-  g.innerHTML='';
-  alertHistory.slice(0,10).forEach(a=>{
-    const d=document.createElement('div');d.className='alert-item';
-    d.innerHTML=`<div class="a-dot" style="background:${a.col}"></div>
-      <div><div class="a-text">${a.msg}</div><div class="a-time">${a.time}</div></div>`;
-    g.appendChild(d);
-  });
-}
-
-let scActive = false;
-
-function setScenario(i, el){
-  scIdx=i;
-  document.querySelectorAll('.scen-btn').forEach(b=>b.classList.remove('active'));
-  el.classList.add('active');
-  setText('sh-site', SCENARIOS[i].site);
-  scActive=true;
-}
-
-function update(d){
-  frameN=d.frame_idx;
-  const n=d.n_agents;
-  const delta=n-prevN; prevN=n;
-  agBuf.push(n);if(agBuf.length>20)agBuf.shift();
-  spBuf.push(d.mean_speed||0);if(spBuf.length>20)spBuf.shift();
-
-  setText('m-agents',n);
-  setText('m-fused',d.fused_count);
-  const dEl=document.getElementById('m-delta');
-  if(dEl){dEl.textContent=(delta>=0?'+':'')+delta;dEl.style.color=delta>0?'var(--risk-hi)':'var(--risk-low)'}
-
-  const rs=d.risk_score||0;
-  const rl=d.risk_label||'LOW';
-  setText('m-risk',(rs).toFixed(2));
-  const rlEl=document.getElementById('m-risklbl');
-  if(rlEl){rlEl.textContent=rl;rlEl.className='risk-pill '+riskPillCls(rl)}
-  const rb=document.getElementById('risk-bar');
-  if(rb){rb.style.width=Math.round(rs*100)+'%';rb.style.background=riskColor(rl)}
-  setText('m-conf',(d.mean_confidence||0).toFixed(2));
-
-  const tr=d.crowd_trend||'STABLE';
-  const tEl=document.getElementById('m-trend');
-  if(tEl){tEl.textContent=tr;tEl.style.color=tr==='GROWING'?'var(--risk-hi)':tr==='DISPERSING'?'var(--risk-low)':'var(--risk-med)'}
-  setText('m-slope',`slope ${(d.trend_slope>=0?'+':'')+d.trend_slope} · R²${d.trend_r2}`);
-
-  const simOn=d.sim_triggered;
-  const sEl=document.getElementById('m-sim');
-  if(sEl){sEl.textContent=simOn?'Active · +20s':'Idle';sEl.style.color=simOn?'var(--risk-low)':'var(--risk-med)'}
-  setText('m-simreason',`Trend: ${tr}${rl==='HIGH'?' + HIGH':''}`)
-
-  setText('kv-fps',d.fps+' fps');
-  setText('kv-lat',d.latency_ms+' ms');
-  setText('kv-mconf',(d.mean_confidence||0).toFixed(2));
-  buildSegs(d.fps||0);
-
-  const nfr=d.nfr||{};
-  const nfEl=document.getElementById('nfr-fps');
-  if(nfEl){nfEl.textContent=nfr.fps_pass?'Pass':'Fail';nfEl.className=nfr.fps_pass?'nfr-pass':'nfr-fail'}
-  const nlEl=document.getElementById('nfr-lat');
-  if(nlEl){nlEl.textContent=nfr.latency_pass?'Pass':'Fail';nlEl.className=nfr.latency_pass?'nfr-pass':'nfr-fail'}
-
-  setText('sh-frame','#'+String(frameN).padStart(4,'0'));
-  setText('sh-time',new Date().toLocaleTimeString('en-IN'));
-
-  if(d.heatmap_b64){
-    const img=document.getElementById('cam-feed');
-    const nf=document.getElementById('no-feed');
-    if(img){img.src='data:image/jpeg;base64,'+d.heatmap_b64;img.style.display='block'}
-    if(nf)nf.style.display='none';
-    setText('cam-fps',(d.fps||0)+' FPS');
-    setText('cam-label',`LIVE · ${n} tracked · ${rl} risk · Fusion conf ${(d.fusion?.confidence||0).toFixed(2)}`);
-  }
-
-  if(d.zones)buildZoneGrid(d.zones);
-  buildAlerts(d.alerts||[]);
-
-  // Fusion panel
-  const f=d.fusion||{};
-  setText('fp-vc',f.video_count??'—');
-  setText('fp-ic',f.iot_count??'—');
-  setText('fp-fc',f.fused_count??'—');
-  setText('fp-fconf',(f.confidence??0).toFixed(3));
-  setText('fp-disc',f.discrepancy??'—');
-  const occEl=document.getElementById('fp-occ');
-  if(occEl){
-    occEl.textContent=f.occlusion_flag?'YES — boosting conf':'No';
-    occEl.style.color=f.occlusion_flag?'var(--risk-med)':'var(--risk-low)';
-  }
-  setText('fp-scale',(f.conf_scale??1).toFixed(3));
-  setText('kv-entry',f.iot_entry??'—');
-  setText('kv-exit',f.iot_exit??'—');
-  const occKvEl=document.getElementById('kv-occ');
-  if(occKvEl){occKvEl.textContent=f.occlusion_flag?'YES':'No';occKvEl.style.color=f.occlusion_flag?'var(--risk-med)':'var(--risk-low)'}
-
-  // Simulation panel
-  const predTotal=d.zones?Object.values(d.zones).reduce((s,z)=>s+(z.predicted||0),0):0;
-  setText('sim-trig',simOn?'Active':'Idle');
-  const stEl=document.getElementById('sim-trig');if(stEl)stEl.style.color=simOn?'var(--risk-low)':'var(--risk-med)';
-  setText('sim-slope',(d.trend_slope>=0?'+':'')+d.trend_slope);
-  setText('sim-pred',predTotal);
-  // Rough Fruin LOS estimate
-  const avgDens=d.zones?Object.values(d.zones).reduce((s,z)=>s+(z.density||0),0)/Object.keys(d.zones).length:0;
-  const los=avgDens<0.5?'A (safe)':avgDens<1?'B':avgDens<2?'C':avgDens<3?'D':avgDens<4?'E (caution)':'F (danger)';
-  setText('sim-los',los);
-
-  // Ticker
-  tIdx=(tIdx+1)%TICKERS.length;
-  setText('ticker-text',(d.alerts&&d.alerts.length>0)?d.alerts.join('  ·  '):TICKERS[tIdx]);
-  const tdEl=document.getElementById('ticker-dot');
-  if(tdEl)tdEl.style.background=rl==='HIGH'?'var(--risk-hi)':rl==='MEDIUM'?'var(--saffron)':'var(--green)';
-  setText('ticker-count',alertHistory.length+' alerts');
-
-  spark('sp-agents',agBuf,'#1a73e8');
-  spark('sp-speed',spBuf,'#e8a000');
-}
-
-function connect(){
-  const pill=document.getElementById('ws-pill');
-  if(pill){pill.textContent='connecting...';pill.className='ws-pill ws-off'}
-  ws=new WebSocket(WS_URL);
-  ws.onopen=()=>{
-    if(pill){pill.textContent='live';pill.className='ws-pill ws-live'}
-    clearTimeout(reconnTimer);
-    setInterval(()=>{if(ws&&ws.readyState===1)ws.send('ping')},5000);
+  ws.onopen = () => {
+    const pill = document.getElementById('ws-pill');
+    pill.innerText = 'WS CONNECTED';
+    pill.className = 'ws-pill ws-live';
   };
-  ws.onmessage=e=>{
-    try{update(JSON.parse(e.data))}catch(err){console.warn(err)}
+
+  ws.onmessage = (evt) => {
+    try {
+      const data = JSON.parse(evt.data);
+      renderTelemetry(data);
+    } catch(e) { console.error('WS Parse Error', e); }
   };
-  ws.onclose=()=>{
-    if(pill){pill.textContent='reconnecting';pill.className='ws-pill ws-off'}
-    reconnTimer=setTimeout(connect,2000);
+
+  ws.onclose = () => {
+    const pill = document.getElementById('ws-pill');
+    pill.innerText = 'DISCONNECTED';
+    pill.className = 'ws-pill ws-off';
+    setTimeout(connectWS, 2000);
   };
-  ws.onerror=()=>ws.close();
 }
 
-connect();
+function renderTelemetry(d){
+  // Camera frame feed
+  if(d.frame){
+    const img = document.getElementById('cam-feed');
+    const nof = document.getElementById('no-feed');
+    img.src = 'data:image/jpeg;base64,' + d.frame;
+    img.style.display = 'block';
+    nof.style.display = 'none';
+  }
+
+  // Header and metrics
+  document.getElementById('sh-frame').innerText = `#${d.frame_idx || 0}`;
+  document.getElementById('sh-time').innerText = new Date().toLocaleTimeString();
+  document.getElementById('hud-fps').innerText = `${(d.fps || 0).toFixed(1)} FPS`;
+
+  document.getElementById('mv-count').innerText = d.n_agents || 0;
+  document.getElementById('kv-fps').innerText = `${(d.fps || 0).toFixed(1)} FPS`;
+  document.getElementById('kv-lat').innerText = `${(d.latency_ms || 0).toFixed(1)} ms`;
+  document.getElementById('kv-conf').innerText = `${(d.mean_confidence || 0).toFixed(2)}`;
+
+  // Risk badge
+  const rVal = (d.risk_score || 0).toFixed(2);
+  const rLbl = d.risk_label || 'LOW';
+  const rBadge = document.getElementById('badge-risk');
+  rBadge.innerText = `${rVal} · ${rLbl}`;
+  rBadge.className = `badge badge-${rLbl.toLowerCase()}`;
+
+  // Trend
+  document.getElementById('mv-trend').innerText = d.crowd_trend || 'STABLE';
+  document.getElementById('ms-trend').innerText = `Slope: ${(d.trend_slope || 0).toFixed(2)} | R²: ${(d.trend_r2 || 0).toFixed(2)}`;
+
+  // Forecast
+  document.getElementById('mv-sim').innerText = d.sim_triggered ? 'ACTIVE (+20s)' : 'IDLE';
+
+  // Update sparklines
+  updateSparkline('spark-count', d.n_agents || 0, '#06b6d4');
+  updateSparkline('spark-risk', d.risk_score || 0, rLbl==='HIGH'?'#ef4444':rLbl==='MEDIUM'?'#f59e0b':'#10b981');
+  updateSparkline('spark-trend', d.trend_slope || 0, '#06b6d4');
+
+  // Zones Grid
+  if(d.zones){
+    const grid = document.getElementById('zone-grid');
+    grid.innerHTML = '';
+    const capList = CAPS[activeScenario].caps;
+    let idx = 0;
+
+    for(const [zName, z] of Object.entries(d.zones)){
+      const cap = capList[idx] || 25;
+      const pct = Math.min(100, Math.round((z.count / cap) * 100));
+      const color = z.risk==='HIGH'?'#ef4444':z.risk==='MEDIUM'?'#f59e0b':'#10b981';
+
+      const cell = document.createElement('div');
+      cell.className = 'zone-cell';
+      cell.innerHTML = `
+        <div class="zc-header">
+          <span class="zc-name">${zName}</span>
+          <span class="badge badge-${z.risk.toLowerCase()}">${z.fruin_los}</span>
+        </div>
+        <div class="zc-count">${z.count}</div>
+        <div class="zc-dens">${z.density} p/m² · ${z.flow_x >= 0 ? '+' : ''}${z.flow_x.toFixed(1)}m/s</div>
+        <div class="zc-progress">
+          <div class="zc-fill" style="width:${pct}%;background:${color}"></div>
+        </div>
+      `;
+      grid.appendChild(cell);
+      idx++;
+    }
+  }
+}
+
+connectWS();
 </script>
+
 </body>
 </html>

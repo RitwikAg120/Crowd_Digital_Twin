@@ -55,11 +55,11 @@ from experience.experience_buffer import ExperienceBuffer
 
 class Config:
     # Model
-    YOLO_MODEL        = "weights/yolov8n_cdt.pt"   # fine-tuned; falls back to base
-    YOLO_MODEL_BASE   = "yolov8n.pt"
-    YOLO_CONF         = 0.35
+    YOLO_MODEL        = "weights/yolo11s_crowdhuman.pt"   # fine-tuned; falls back to base
+    YOLO_MODEL_BASE   = "yolo11s.pt"
+    YOLO_CONF         = 0.10       # High-recall threshold for dense overhead/cctv crowds
     YOLO_IOU          = 0.50
-    YOLO_IMGSZ        = 640
+    YOLO_IMGSZ        = 1280       # High-resolution inference for dense overhead crowd views
 
     # Pipeline
     FRAME_SKIP        = 2          # process every Nth frame
@@ -70,17 +70,22 @@ class Config:
     ZONE_ROWS         = 2
     ZONE_COLS         = 3
 
-    # Risk thresholds
-    DENSITY_LOW       = 0.15       # persons per 10k px²
-    DENSITY_HIGH      = 0.40
-    VELOCITY_THR      = 25.0       # px/frame — alert threshold
+    # Risk thresholds & Physical Spatial Metrics
+    DENSITY_LOW       = 0.43       # persons/m² (Fruin LOS B threshold)
+    DENSITY_HIGH      = 1.08       # persons/m² (Fruin LOS E threshold)
+    VELOCITY_THR      = 1.5        # m/s — alert threshold
     RISK_WINDOW       = 15         # frames for trend window
+
+    # Spatial Homography (Physical ground plane in meters)
+    GROUND_WIDTH_M    = 20.0       # scene ground width in meters
+    GROUND_HEIGHT_M   = 12.0       # scene ground height in meters
 
     # Simulation
     PRED_HORIZON      = 25         # steps (~20s at 25fps/skip2)
     TRACKER_BUFFER    = 30
 
-    # Fusion weights
+    # Fusion weights & IoT Toggle
+    IOT_ENABLED       = False      # Decoupled by default for pure vision integrity
     W_VIDEO           = 0.70
     W_IOT             = 0.30
     DISCREP_THR       = 5          # persons before flagging discrepancy
@@ -113,6 +118,68 @@ class Agent:
     confidence: float = 1.0
     zone:       str   = ""
     history:    list  = field(default_factory=list)
+    track_len:  int   = 1
+    bbox:       list  = field(default_factory=list)
+
+
+class HomographyTransformer:
+    """
+    Ground-plane perspective transformation:
+    Maps 2D image pixel coordinates (cx, cy) to ground plane (X, Y) in meters.
+    Uses cv2.getPerspectiveTransform with 4 source image points and 4 destination ground points.
+    """
+    def __init__(self, img_w: int = Config.FRAME_WIDTH, img_h: int = Config.FRAME_HEIGHT,
+                 ground_w: float = Config.GROUND_WIDTH_M, ground_h: float = Config.GROUND_HEIGHT_M):
+        self.img_w = img_w
+        self.img_h = img_h
+        self.ground_w = ground_w
+        self.ground_h = ground_h
+
+        src_pts = np.float32([
+            [int(img_w * 0.10), int(img_h * 0.15)],  # Top-left
+            [int(img_w * 0.90), int(img_h * 0.15)],  # Top-right
+            [img_w, img_h],                          # Bottom-right
+            [0, img_h]                               # Bottom-left
+        ])
+        dst_pts = np.float32([
+            [0.0, 0.0],
+            [ground_w, 0.0],
+            [ground_w, ground_h],
+            [0.0, ground_h]
+        ])
+        self.H = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        self.px_to_m_scale = (ground_w * ground_h) / max(img_w * img_h, 1)
+
+    def image_to_ground(self, cx: float, cy: float) -> Tuple[float, float]:
+        pt = np.array([cx, cy, 1.0], dtype=np.float32)
+        res = self.H @ pt
+        if abs(res[2]) < 1e-6:
+            return 0.0, 0.0
+        return float(res[0] / res[2]), float(res[1] / res[2])
+
+
+def compute_fruin_los(density_pm2: float) -> str:
+    """
+    Fruin Level of Service (LOS) criteria based on spatial density (persons per m²):
+      LOS A: <= 0.31 p/m² (Free flow, high comfort)
+      LOS B: 0.31 - 0.43 p/m² (Flow zone, minor restriction)
+      LOS C: 0.43 - 0.72 p/m² (Speeds restricted)
+      LOS D: 0.72 - 1.08 p/m² (Severely restricted, frequent contact)
+      LOS E: 1.08 - 1.33 p/m² (Shuffling / capacity limit)
+      LOS F: > 1.33 p/m² (Extreme crush risk / breakdown)
+    """
+    if density_pm2 <= 0.31:
+        return "A"
+    elif density_pm2 <= 0.43:
+        return "B"
+    elif density_pm2 <= 0.72:
+        return "C"
+    elif density_pm2 <= 1.08:
+        return "D"
+    elif density_pm2 <= 1.33:
+        return "E"
+    else:
+        return "F"
 
 
 @dataclass
@@ -123,6 +190,7 @@ class ZoneState:
     x2:       int
     y2:       int
     capacity: int = 50
+    area_m2:  float = 40.0
 
     @property
     def area(self) -> float:
@@ -141,9 +209,11 @@ class ZoneState:
 
 class ZoneManager:
     def __init__(self, h: int, w: int, rows: int = Config.ZONE_ROWS,
-                 cols: int = Config.ZONE_COLS):
+                 cols: int = Config.ZONE_COLS,
+                 total_ground_area_m2: float = Config.GROUND_WIDTH_M * Config.GROUND_HEIGHT_M):
         self.zones: Dict[str, ZoneState] = {}
         rh, cw = h // rows, w // cols
+        zone_area_m2 = total_ground_area_m2 / (rows * cols)
         labels = "ABCDEFGHIJKLMNOP"
         idx = 0
         for r in range(rows):
@@ -155,7 +225,8 @@ class ZoneManager:
                     y1=r * rh,
                     x2=(c + 1) * cw if c < cols - 1 else w,
                     y2=(r + 1) * rh if r < rows - 1 else h,
-                    capacity=max(10, int((cw * rh) / (w * h) * 150))
+                    capacity=max(10, int(zone_area_m2 * 1.33)), # Capacity based on Fruin LOS E boundary
+                    area_m2=round(zone_area_m2, 2)
                 )
                 idx += 1
 
@@ -200,57 +271,16 @@ class ConfidenceEstimator:
         self._age.pop(agent_id, None)
 
 
-# ─── IoT Simulator ────────────────────────────────────────────────────────────
-
-class IoTSimulator:
-    """
-    Simulates physical entry/exit gate sensors.
-    In real deployment: replace simulate_tick() with MQTT subscriber.
-      e.g.  import paho.mqtt.client as mqtt
-            client.subscribe("venue/gate/entry")
-            def on_message(msg): self.push_real(int(msg.payload), 0)
-    """
-    def __init__(self, noise_std: float = Config.IOT_NOISE_STD):
-        self.noise_std          = noise_std
-        self._cumulative_entry  = 0
-        self._cumulative_exit   = 0
-        self._history           = deque(maxlen=200)
-
-    def simulate_tick(self, video_count: int, frame_idx: int) -> Tuple[int, int]:
-        noise  = np.random.normal(0, self.noise_std)
-        entry  = max(0, int(video_count * Config.IOT_ENTRY_RATE + noise))
-        exit_  = max(0, int(video_count * Config.IOT_EXIT_RATE  + abs(noise * 0.5)))
-        self._cumulative_entry += entry
-        self._cumulative_exit  += exit_
-        self._history.append((frame_idx, entry, exit_))
-        return entry, exit_
-
-    def push_real(self, entry: int, exit_: int):
-        """Call this from your real sensor callback instead of simulate_tick."""
-        self._cumulative_entry += entry
-        self._cumulative_exit  += exit_
-
-    @property
-    def net_count(self) -> int:
-        return max(0, self._cumulative_entry - self._cumulative_exit)
-
-
-# ─── Data Fusion Layer ────────────────────────────────────────────────────────
+# ─── Data Fusion & Telemetry Layer ───────────────────────────────────────────
 
 class DataFusionLayer:
     """
-    Multi-modal sensor fusion:
-      Stream 1: Video detections (YOLOv8n + ByteTrack)   weight=0.70
-      Stream 2: IoT gate counters (entry/exit cumulative) weight=0.30
-      Stream 3: ETH/UCY mobility priors (zone confidence modifier)
-
-    Key insight: video undercounts in crowds (occlusion).
-    IoT overcounts slightly (re-entry, sensor noise).
-    Weighted fusion + discrepancy detection corrects both.
+    Pure AI Vision Telemetry Engine:
+      Stream 1: Video detections (YOLO11s + ByteTrack)
+      Stream 2: ETH/UCY mobility physics priors (zone confidence modifier)
     """
 
     def __init__(self):
-        self.iot      = IoTSimulator()
         self.mobility: Dict[str, float] = {}   # zone_name -> confidence_weight
         self._log     = deque(maxlen=300)
 
@@ -258,7 +288,7 @@ class DataFusionLayer:
         """Load ETH/UCY trajectory data to compute per-zone flow priors."""
         eth_path = Path(eth_ucy_root)
         if not eth_path.exists():
-            print(f"[Fusion] ETH/UCY path not found: {eth_ucy_root}. Using uniform priors.")
+            print(f"[Telemetry] ETH/UCY path not found: {eth_ucy_root}. Using uniform priors.")
             for name in zone_mgr.zones:
                 self.mobility[name] = 1.0
             return
@@ -285,67 +315,36 @@ class DataFusionLayer:
                 # (extend with per-zone matching if you have zone-labelled data)
                 self.mobility[name] = max(0.75, 1.0 - (global_mean / 100.0))
 
-            print(f"[Fusion] ETH/UCY priors loaded. Global mean speed: {global_mean:.3f}")
+            print(f"[Telemetry] ETH/UCY priors loaded. Global mean speed: {global_mean:.3f}")
         except Exception as e:
-            print(f"[Fusion] ETH/UCY load failed: {e}. Using uniform priors.")
+            print(f"[Telemetry] ETH/UCY load failed: {e}. Using uniform priors.")
             for name in zone_mgr.zones:
                 self.mobility[name] = 1.0
 
     def fuse(self, video_detections: list, frame_idx: int) -> dict:
-        """
-        Call every frame. Returns fusion result dict consumed by DT engine.
-
-        Paper equation:
-          C_f = W_VIDEO × C_video + W_IOT × C_iot
-          κ   = 1 − (|C_video − C_iot| / max(C_video, C_iot, 1))
-        """
+        """Call every frame. Returns 100% pure vision telemetry result."""
         video_count = len(video_detections)
+        fusion_conf = 1.0
+        fused_count = float(video_count)
 
-        # Stream 2: IoT tick
-        entry, exit_ = self.iot.simulate_tick(video_count, frame_idx)
-        iot_count    = self.iot.net_count
-
-        # Discrepancy detection
-        discrepancy      = abs(video_count - iot_count)
-        discrepancy_flag = discrepancy > Config.DISCREP_THR
-
-        # Confidence rescaling direction
-        if discrepancy_flag:
-            if iot_count > video_count:
-                # IoT sees more → occlusion → boost conf
-                conf_scale = min(1.0, 1.0 + discrepancy * 0.02)
-            else:
-                # Video sees more → false dets → lower conf
-                conf_scale = max(0.6, 1.0 - discrepancy * 0.02)
-        else:
-            conf_scale = 1.0
-
-        # Rescale detection confidences (Stream 1 + Stream 3)
+        # Rescale detection confidences with ETH/UCY mobility zone priors
         fused_dets = []
         for det in video_detections:
             zone_w  = self.mobility.get(det.get("zone", ""), 1.0)
             new_det = dict(det)
-            new_det["confidence"] = round(
-                min(1.0, det["confidence"] * conf_scale * zone_w), 3)
+            new_det["confidence"] = round(min(1.0, det["confidence"] * zone_w), 3)
             fused_dets.append(new_det)
-
-        # Weighted count fusion
-        fused_count = Config.W_VIDEO * video_count + Config.W_IOT * iot_count
-
-        # Fusion confidence: how much do streams agree?
-        max_c        = max(video_count, iot_count, 1)
-        fusion_conf  = round(max(0.0, 1.0 - discrepancy / max_c), 3)
 
         result = {
             "fused_detections":  fused_dets,
             "fused_count":       round(fused_count, 1),
             "video_count":       video_count,
-            "iot_count":         iot_count,
-            "iot_entry_delta":   entry,
-            "iot_exit_delta":    exit_,
-            "discrepancy":       discrepancy,
-            "discrepancy_flag":  discrepancy_flag,
-            "conf_scale":        round(conf_scale, 3),
+            "iot_count":         video_count,
+            "iot_entry_delta":   0,
+            "iot_exit_delta":    0,
+            "discrepancy":       0,
+            "discrepancy_flag":  False,
+            "conf_scale":        1.0,
             "fusion_confidence": fusion_conf,
         }
         self._log.append(result)
@@ -361,6 +360,7 @@ class DigitalTwinEngine:
         self.agents:    Dict[int, Agent] = {}
         self.zone_mgr   = zone_mgr
         self.conf_est   = conf_est
+        self.homography = HomographyTransformer()
         self.frame_idx  = 0
         self.state_log  = deque(maxlen=Config.RISK_WINDOW * 4)
 
@@ -368,6 +368,7 @@ class DigitalTwinEngine:
                fused_count: float = 0.0):
         self.frame_idx += 1
         seen = set()
+        dt_sec = max(0.01, Config.FRAME_SKIP / 25.0)  # Time delta in seconds per pipeline step
 
         for det in detections:
             aid   = det["id"]
@@ -379,13 +380,21 @@ class DigitalTwinEngine:
 
             if aid in self.agents:
                 a  = self.agents[aid]
-                vx = self.ALPHA * (xn - a.x) + (1 - self.ALPHA) * a.vx
-                vy = self.ALPHA * (yn - a.y) + (1 - self.ALPHA) * a.vy
+                # Homography spatial meter displacement
+                gx0, gy0 = self.homography.image_to_ground(a.x, a.y)
+                gx1, gy1 = self.homography.image_to_ground(xn, yn)
+                vx_m = (gx1 - gx0) / dt_sec
+                vy_m = (gy1 - gy0) / dt_sec
+
+                vx = self.ALPHA * vx_m + (1 - self.ALPHA) * a.vx
+                vy = self.ALPHA * vy_m + (1 - self.ALPHA) * a.vy
                 a.x, a.y   = xn, yn
                 a.vx, a.vy = vx, vy
-                a.speed    = math.hypot(vx, vy)
+                a.speed    = round(math.hypot(vx, vy), 2)  # m/s
                 a.zone     = zone
                 a.confidence = conf
+                a.bbox     = det.get("bbox", [])
+                a.track_len += 1
                 a.history.append((xn, yn))
                 if len(a.history) > 12:
                     a.history.pop(0)
@@ -393,7 +402,8 @@ class DigitalTwinEngine:
                 self.agents[aid] = Agent(
                     id=aid, x=xn, y=yn,
                     zone=zone, confidence=conf,
-                    history=[(xn, yn)]
+                    history=[(xn, yn)], track_len=1,
+                    bbox=det.get("bbox", [])
                 )
 
         # Remove stale tracks
@@ -401,12 +411,13 @@ class DigitalTwinEngine:
             self.conf_est.drop(stale)
             del self.agents[stale]
 
+        active_agents = [a for a in self.agents.values() if a.track_len >= 1]
         self.state_log.append({
             "frame":      self.frame_idx,
-            "n_agents":   len(self.agents),
+            "n_agents":   len(active_agents),
             "fused_count": fused_count,
-            "mean_speed": float(np.mean([a.speed for a in self.agents.values()])
-                                if self.agents else 0.0),
+            "mean_speed": float(np.mean([a.speed for a in active_agents])
+                                if active_agents else 0.0),
         })
 
     def simulate_future(self, steps: int, h: int, w: int) -> List[Dict]:
@@ -448,7 +459,7 @@ class DensityFlowEstimator:
     def zone_density(self, agents: List[Agent]) -> Dict[str, float]:
         counts = self.zone_mgr.count(agents)
         return {
-            name: counts[name] / max(z.area / 1e4, 1.0)
+            name: round(counts[name] / max(z.area_m2, 0.1), 4)
             for name, z in self.zone_mgr.zones.items()
         }
 
@@ -528,18 +539,44 @@ class RiskEstimator:
 # ─── Alert Engine ─────────────────────────────────────────────────────────────
 
 class AlertEngine:
-    MSGS = {
-        "HIGH":   "CRITICAL: {zone} — {count} agents, HIGH density. Immediate intervention required.",
-        "MEDIUM": "WARNING:  {zone} — {count} agents approaching threshold.",
+    """
+    Alert Engine (Layer M) with cooldown-based deduplication and priority levels.
+    Enforces per-zone cooldown intervals to prevent alert spamming.
+    """
+    COOLDOWN_SEC = 10.0   # minimum seconds between alerts for the same zone & risk level
+
+    PRIORITY_LEVELS = {
+        "HIGH":   {"label": "CRITICAL", "level": 1, "color": "red"},
+        "MEDIUM": {"label": "WARNING",  "level": 2, "color": "orange"},
+        "LOW":    {"label": "INFO",     "level": 3, "color": "green"},
     }
 
+    MSGS = {
+        "HIGH":   "CRITICAL [P1]: {zone} — {count} agents, HIGH density. Immediate intervention required.",
+        "MEDIUM": "WARNING [P2]: {zone} — {count} agents approaching threshold.",
+    }
+
+    def __init__(self, cooldown_sec: float = 10.0):
+        self.cooldown_sec = cooldown_sec
+        self._last_alert: Dict[str, float] = {}   # key: "(zone, risk_label)" -> timestamp
+
     def generate(self, zone_risks: dict, zone_counts: dict) -> List[str]:
+        now = time.time()
         alerts = []
+
         for zone, r in zone_risks.items():
-            if r["risk_label"] in ("HIGH", "MEDIUM"):
-                alerts.append(self.MSGS[r["risk_label"]].format(
-                    zone=zone, count=zone_counts.get(zone, 0)
-                ))
+            rl = r.get("risk_label", "LOW")
+            if rl in ("HIGH", "MEDIUM"):
+                key = f"{zone}:{rl}"
+                last_t = self._last_alert.get(key, 0.0)
+
+                # Cooldown-based deduplication check
+                if (now - last_t) >= self.cooldown_sec:
+                    cnt = zone_counts.get(zone, 0)
+                    msg = self.MSGS[rl].format(zone=zone, count=cnt)
+                    alerts.append(msg)
+                    self._last_alert[key] = now
+
         return alerts
 
 
@@ -606,7 +643,7 @@ class CDTPipeline:
         # Load fine-tuned weights if available, else fall back to base
         model_path = Config.YOLO_MODEL
         if not Path(model_path).exists():
-            print(f"[CDT] Fine-tuned weights not found at {model_path}. Using base YOLOv8n.")
+            print(f"[CDT] Custom weights not found at {model_path}. Using base {Config.YOLO_MODEL_BASE}.")
             model_path = Config.YOLO_MODEL_BASE
         self.model   = YOLO(model_path)
 
@@ -680,10 +717,11 @@ class CDTPipeline:
             # ── Resize ────────────────────────────────────────────────────────
             frame = cv2.resize(frame, (self._w, self._h))
 
-            # ── Edge AI: YOLOv8n ──────────────────────────────────────────────
+            # ── Edge AI: Object Detection ─────────────────────────────────────
+            classes_arg = [0] if (hasattr(self.model, "names") and len(self.model.names) == 80) else None
             results = self.model(
                 frame,
-                classes=[0],
+                classes=classes_arg,
                 conf=Config.YOLO_CONF,
                 iou=Config.YOLO_IOU,
                 imgsz=Config.YOLO_IMGSZ,
@@ -695,7 +733,7 @@ class CDTPipeline:
             tracked = self.tracker.update_with_detections(dets)
 
             det_list = []
-            if tracked.tracker_id is not None:
+            if tracked.tracker_id is not None and len(tracked.tracker_id) > 0:
                 for xyxy, tid, conf in zip(
                     tracked.xyxy, tracked.tracker_id, tracked.confidence
                 ):
@@ -707,6 +745,20 @@ class CDTPipeline:
                         "cy":         cy,
                         "confidence": float(conf),
                         "zone":       self.zone_mgr.assign(cx, cy),
+                        "bbox":       [float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])],
+                    })
+            elif len(dets) > 0:
+                # Fallback to raw detections on frame 1 while tracker initializes
+                for idx, (xyxy, conf) in enumerate(zip(dets.xyxy, dets.confidence)):
+                    cx = float((xyxy[0] + xyxy[2]) / 2)
+                    cy = float((xyxy[1] + xyxy[3]) / 2)
+                    det_list.append({
+                        "id":         idx + 1000,
+                        "cx":         cx,
+                        "cy":         cy,
+                        "confidence": float(conf),
+                        "zone":       self.zone_mgr.assign(cx, cy),
+                        "bbox":       [float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])],
                     })
 
             # ── Data Fusion ───────────────────────────────────────────────────
@@ -719,7 +771,7 @@ class CDTPipeline:
             self.dt.update(det_list, z_dens_pre, fused_count=fused_count)
 
             # ── Post-update state ─────────────────────────────────────────────
-            agents_now = list(self.dt.agents.values())
+            agents_now = [a for a in self.dt.agents.values() if a.track_len >= 1]
             z_dens     = self.density.zone_density(agents_now)
             z_counts   = self.zone_mgr.count(agents_now)
             z_flow     = self.density.zone_flow(agents_now)
@@ -731,8 +783,10 @@ class CDTPipeline:
             self.trend.push(len(agents_now), mean_spd)
             trend_res = self.trend.analyze()
 
-            # ── Risk estimator ────────────────────────────────────────────────
-            global_dens = float(np.mean(list(z_dens.values()))) if z_dens else 0.0
+            # ── Risk estimator: Max-pooled risk aggregation ───────────────────
+            max_dens   = float(np.max(list(z_dens.values()))) if z_dens else 0.0
+            mean_dens  = float(np.mean(list(z_dens.values()))) if z_dens else 0.0
+            global_dens = round(0.70 * max_dens + 0.30 * mean_dens, 4)
             risk_res = self.risk_est.classify(
                 global_dens, mean_spd, trend_res["crowd_trend"], mean_conf
             )
@@ -782,6 +836,11 @@ class CDTPipeline:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
 
             for a in agents_now:
+                if hasattr(a, "bbox") and len(a.bbox) == 4 and a.bbox[2] > a.bbox[0]:
+                    x1, y1, x2, y2 = map(int, a.bbox)
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 240, 255), 2)
+                    cv2.putText(overlay, f"#{a.id}", (x1, max(y1 - 4, 12)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 240, 255), 1)
                 cv2.circle(overlay, (int(a.x), int(a.y)), 4, (255, 255, 100), -1)
 
             _, buf       = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 72])
@@ -795,6 +854,7 @@ class CDTPipeline:
 
             # ── WebSocket payload ─────────────────────────────────────────────
             payload = {
+                "frame":            heatmap_b64,
                 "frame_idx":        self._frame_n,
                 "timestamp":        round(time.time(), 3),
                 "n_agents":         len(agents_now),
@@ -803,6 +863,7 @@ class CDTPipeline:
                 "mean_confidence":  round(mean_conf, 3),
                 "risk_score":       risk_res["risk_score"],
                 "risk_label":       risk_res["risk_label"],
+                "scene_fruin_los":  compute_fruin_los(global_dens),
                 "crowd_trend":      trend_res["crowd_trend"],
                 "trend_slope":      trend_res["slope"],
                 "trend_r2":         trend_res["r2"],
@@ -810,26 +871,28 @@ class CDTPipeline:
                 "fps":              fps,
                 "latency_ms":       lat,
                 "fusion": {
-                    "video_count":    fusion_result["video_count"],
-                    "iot_count":      fusion_result["iot_count"],
+                    "video_count":    fusion_result.get("video_count", 0),
+                    "iot_count":      fusion_result.get("iot_count", 0),
                     "fused_count":    round(fused_count, 1),
-                    "confidence":     fusion_result["fusion_confidence"],
-                    "discrepancy":    fusion_result["discrepancy"],
-                    "occlusion_flag": fusion_result["discrepancy_flag"],
-                    "iot_entry":      fusion_result["iot_entry_delta"],
-                    "iot_exit":       fusion_result["iot_exit_delta"],
-                    "conf_scale":     fusion_result["conf_scale"],
+                    "confidence":     fusion_result.get("confidence", 1.0),
+                    "discrepancy":    fusion_result.get("discrepancy", 0),
+                    "occlusion_flag": fusion_result.get("occlusion_flag", False),
+                    "iot_entry":      fusion_result.get("iot_entry", 0),
+                    "iot_exit":       fusion_result.get("iot_exit", 0),
+                    "conf_scale":     1.0,
                 },
                 "zones": {
                     n: {
                         "count":      z_counts.get(n, 0),
                         "density":    round(z_dens.get(n, 0.0), 4),
+                        "fruin_los":  compute_fruin_los(z_dens.get(n, 0.0)),
                         "risk":       zone_risks[n]["risk_label"],
                         "risk_score": zone_risks[n]["risk_score"],
                         "flow_x":     round(z_flow.get(n, (0, 0))[0], 2),
                         "flow_y":     round(z_flow.get(n, (0, 0))[1], 2),
                         "predicted":  pred_zones.get(n, 0),
                         "capacity":   self.zone_mgr.zones[n].capacity,
+                        "area_m2":    self.zone_mgr.zones[n].area_m2,
                     }
                     for n in self.zone_mgr.zones
                 },
@@ -867,10 +930,11 @@ class CDTPipeline:
             # Rate-limited broadcast
             now = time.time()
             if now - last_broadcast >= broadcast_interval:
-                asyncio.run_coroutine_threadsafe(
-                    manager.broadcast(json.dumps(payload)),
-                    app_loop,
-                )
+                if app_loop is not None and app_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        manager.broadcast(json.dumps(payload)),
+                        app_loop,
+                    )
                 last_broadcast = now
 
     def stop(self):
@@ -996,13 +1060,15 @@ except Exception:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Crowd Digital Twin — Real-Time Server")
     parser.add_argument(
-        "--source", default="videos/mot17_demo.mp4",
+        "--source", default="videos/my_cctv_clip.mp4",
         help="Video source: 0=webcam | rtsp://... | path/to/video.mp4"
     )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", default=8000, type=int)
+    parser.add_argument("--iot-enabled", action="store_true", help="Enable synthetic IoT gate simulator stream")
     args = parser.parse_args()
 
+    Config.IOT_ENABLED = args.iot_enabled
     src = int(args.source) if args.source.isdigit() else args.source
     pipeline = CDTPipeline(src)
 
