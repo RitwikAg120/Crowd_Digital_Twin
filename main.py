@@ -11,7 +11,7 @@ Members:
 
 Architecture:
   CCTV/IoT/Mobility → VideoInputHandler → DataFusionLayer
-  → Edge AI (YOLOv8n) → ByteTrack → ConfidenceEstimator
+  → Edge AI (YOLOv26s) → ByteTrack → ConfidenceEstimator
   → CrowdStateRepresentation + Heatmaps → ZoneManager
   → DensityFlowEstimator → DigitalTwinEngine (Agent-Based)
   → TrendPredictor → SimulationTrigger → ShortHorizonSimulation
@@ -55,14 +55,14 @@ from experience.experience_buffer import ExperienceBuffer
 
 class Config:
     # Model
-    YOLO_MODEL        = "weights/yolov8n_cdt.pt"   # fine-tuned; falls back to base
-    YOLO_MODEL_BASE   = "yolov8n.pt"
+    YOLO_MODEL        = "weights/yolo26s.pt"   # fine-tuned; falls back to base
+    YOLO_MODEL_BASE   = "yolo26s.pt"
     YOLO_CONF         = 0.35
     YOLO_IOU          = 0.50
     YOLO_IMGSZ        = 640
 
     # Pipeline
-    FRAME_SKIP        = 2          # process every Nth frame
+    FRAME_SKIP        = 2          # process every frame; set >1 only for deliberate downsampling
     FRAME_WIDTH       = 1280
     FRAME_HEIGHT      = 720
 
@@ -240,7 +240,7 @@ class IoTSimulator:
 class DataFusionLayer:
     """
     Multi-modal sensor fusion:
-      Stream 1: Video detections (YOLOv8n + ByteTrack)   weight=0.70
+      Stream 1: Video detections (YOLOv26s + ByteTrack)   weight=0.70
       Stream 2: IoT gate counters (entry/exit cumulative) weight=0.30
       Stream 3: ETH/UCY mobility priors (zone confidence modifier)
 
@@ -606,7 +606,7 @@ class CDTPipeline:
         # Load fine-tuned weights if available, else fall back to base
         model_path = Config.YOLO_MODEL
         if not Path(model_path).exists():
-            print(f"[CDT] Fine-tuned weights not found at {model_path}. Using base YOLOv8n.")
+            print(f"[CDT] Fine-tuned weights not found at {model_path}. Using base YOLOv26s.")
             model_path = Config.YOLO_MODEL_BASE
         self.model   = YOLO(model_path)
 
@@ -674,13 +674,13 @@ class CDTPipeline:
                 continue
 
             self._frame_n += 1
-            if self._frame_n % Config.FRAME_SKIP != 0:
+            if Config.FRAME_SKIP > 1 and self._frame_n % Config.FRAME_SKIP != 0:
                 continue
 
             # ── Resize ────────────────────────────────────────────────────────
             frame = cv2.resize(frame, (self._w, self._h))
 
-            # ── Edge AI: YOLOv8n ──────────────────────────────────────────────
+            # ── Edge AI: YOLOv26s ──────────────────────────────────────────────
             results = self.model(
                 frame,
                 classes=[0],
@@ -699,10 +699,15 @@ class CDTPipeline:
                 for xyxy, tid, conf in zip(
                     tracked.xyxy, tracked.tracker_id, tracked.confidence
                 ):
-                    cx = float((xyxy[0] + xyxy[2]) / 2)
-                    cy = float((xyxy[1] + xyxy[3]) / 2)
+                    x1, y1, x2, y2 = map(float, xyxy)
+                    cx = float((x1 + x2) / 2)
+                    cy = float((y1 + y2) / 2)
                     det_list.append({
                         "id":         int(tid),
+                        "x1":         x1,
+                        "y1":         y1,
+                        "x2":         x2,
+                        "y2":         y2,
                         "cx":         cx,
                         "cy":         cy,
                         "confidence": float(conf),
@@ -765,11 +770,8 @@ class CDTPipeline:
                         if z in pred_zones:
                             pred_zones[z] += 1
 
-            # ── Heatmap JPEG ──────────────────────────────────────────────────
-            dmap       = self.density.density_map(agents_now, self._h, self._w)
-            heat       = (dmap * 255).astype(np.uint8)
-            heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
-            overlay    = cv2.addWeighted(frame, 0.55, heat_color, 0.45, 0)
+            # ── Bounding-box frame overlay ────────────────────────────────────
+            overlay = frame.copy()
 
             for z in self.zone_mgr.zones.values():
                 rl  = zone_risks[z.name]["risk_label"]
@@ -781,11 +783,19 @@ class CDTPipeline:
                             (z.x1 + 6, z.y1 + 22),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
 
-            for a in agents_now:
-                cv2.circle(overlay, (int(a.x), int(a.y)), 4, (255, 255, 100), -1)
+            for det in det_list:
+                x1, y1, x2, y2 = map(int, (det["x1"], det["y1"], det["x2"], det["y2"]))
+                label = f"#{det['id']} {det['confidence']:.2f}"
+                col = (0, 255, 255)
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), col, 2)
+                cv2.putText(overlay, label, (x1, max(12, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
 
-            _, buf       = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 72])
-            heatmap_b64  = base64.b64encode(buf).decode()
+            for a in agents_now:
+                cv2.circle(overlay, (int(a.x), int(a.y)), 4, (0, 0, 255), -1)
+
+            _, buf        = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 72])
+            annotated_b64 = base64.b64encode(buf).decode()
 
             # ── FPS ───────────────────────────────────────────────────────────
             t1 = time.perf_counter()
@@ -845,7 +855,19 @@ class CDTPipeline:
                     }
                     for a in agents_now
                 ],
-                "heatmap_b64": heatmap_b64,
+                "image_b64": annotated_b64,
+                "bounding_boxes": [
+                    {
+                        "id":    int(det["id"]),
+                        "x1":    round(float(det["x1"]), 1),
+                        "y1":    round(float(det["y1"]), 1),
+                        "x2":    round(float(det["x2"]), 1),
+                        "y2":    round(float(det["y2"]), 1),
+                        "conf":  round(float(det["confidence"]), 3),
+                        "zone":  det.get("zone", ""),
+                    }
+                    for det in det_list
+                ],
                 "nfr": {
                     "fps_pass":     fps >= 10,
                     "latency_pass": lat < 2000,
@@ -947,10 +969,10 @@ async def ws_endpoint(ws: WebSocket):
 
 @app.get("/api/snapshot")
 async def snapshot():
-    """REST fallback — latest pipeline state (no heatmap)."""
+    """REST fallback — latest pipeline state (without image payload)."""
     if pipeline and pipeline.latest_payload:
         p = dict(pipeline.latest_payload)
-        p.pop("heatmap_b64", None)
+        p.pop("image_b64", None)
         return p
     return {"status": "pipeline not started"}
 

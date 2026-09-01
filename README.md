@@ -23,7 +23,7 @@ python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-python main.py --source videos/demo_video.mp4
+python main.py --source videos/demo.mp4
 ```
 
 Then open **http://localhost:8000/** in a browser. You'll see the live
@@ -35,7 +35,7 @@ Other source options:
 ```bash
 python main.py --source 0                          # webcam
 python main.py --source rtsp://<ip>:554/stream      # IP camera
-python main.py --source videos/demo_video_fast_motion.mp4
+python main.py --source videos/demo.mp4
 ```
 
 REST endpoints (no browser needed):
