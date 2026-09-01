@@ -273,7 +273,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   </div>
 
   <div class="cam-wrap" id="cam-wrap">
-    <img id="cam-feed" class="cam-feed" alt="Live heatmap feed">
+    <img id="cam-feed" class="cam-feed" alt="Live detection feed">
     <div id="no-feed" class="no-feed">
       <div class="no-feed-icon">
         <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -510,10 +510,11 @@ function update(d){
   setText('sh-frame','#'+String(frameN).padStart(4,'0'));
   setText('sh-time',new Date().toLocaleTimeString('en-IN'));
 
-  if(d.heatmap_b64){
+  const imageData = d.image_b64;
+  if(imageData){
     const img=document.getElementById('cam-feed');
     const nf=document.getElementById('no-feed');
-    if(img){img.src='data:image/jpeg;base64,'+d.heatmap_b64;img.style.display='block'}
+    if(img){img.src='data:image/jpeg;base64,'+imageData;img.style.display='block'}
     if(nf)nf.style.display='none';
     setText('cam-fps',(d.fps||0)+' FPS');
     setText('cam-label',`LIVE · ${n} tracked · ${rl} risk · Fusion conf ${(d.fusion?.confidence||0).toFixed(2)}`);
