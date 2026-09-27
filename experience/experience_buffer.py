@@ -28,6 +28,7 @@ class ExperienceBuffer:
         save_frames: bool = True,
         frame_save_interval: int = 30,
         img_width: int = 640,
+        max_bytes: int = 2 * 2**30,
     ) -> None:
         self.base = Path(base_path)
         self.logs = self.base / "logs"
@@ -36,6 +37,7 @@ class ExperienceBuffer:
         self.save_frames = save_frames
         self.frame_save_interval = max(1, frame_save_interval)
         self.img_width = img_width
+        self.max_bytes = max_bytes
 
         for p in (self.base, self.logs, self.frames):
             try:
@@ -45,6 +47,8 @@ class ExperienceBuffer:
 
         self._buffer: Deque[Dict[str, Any]] = deque()
         self._lock = threading.Lock()
+        self._n_records = 0
+        self._enforce_cap()
 
     def record(self, frame_idx: int, frame: Optional[np.ndarray],
                detections: List[Dict], agents: List[Dict], metadata: Dict) -> None:
@@ -54,25 +58,33 @@ class ExperienceBuffer:
             "timestamp": ts,
             "detections": [
                 {"id": int(d.get("id", -1)),
-                 "cx": float(d.get("cx", 0)),
-                 "cy": float(d.get("cy", 0)),
-                 "conf": float(d.get("confidence", d.get("conf", 0))) }
+                 "cx": round(float(d.get("cx", 0)), 1),
+                 "cy": round(float(d.get("cy", 0)), 1),
+                 # Feet and box height, for ground calibration on replay
+                 **({"fy": round(float(d["fy"]), 1), "bh": round(float(d["bh"]), 1)}
+                    if d.get("bh") else {}),
+                 "conf": round(float(d.get("confidence", d.get("conf", 0))), 3)}
                 for d in detections
             ],
             "agents": [
-                {"id": int(a.id), "x": float(a.x), "y": float(a.y), "conf": float(a.confidence)}
+                {"id": int(a.id), "x": round(float(a.x), 1), "y": round(float(a.y), 1),
+                 "conf": round(float(a.confidence), 3)}
                 for a in agents
             ],
             "meta": {
                 "n_agents": len(agents),
                 "fused_count": metadata.get("fused_count", None),
-                "risk_label": metadata.get("risk_label", None) or metadata.get("risk_label", None),
+                "risk_label": metadata.get("risk_label", None),
+                # Needed to replay the log through the twin (main.py --replay)
+                "frame_size": metadata.get("frame_size"),
+                "fps": metadata.get("source_fps"),
             },
             "frame_path": None,
         }
 
-        # Save sampled frames (resized) to disk if requested
-        if self.save_frames and frame is not None and (frame_idx % self.frame_save_interval == 0):
+        # Save every Nth record's frame (resized) to disk if requested
+        self._n_records += 1
+        if self.save_frames and frame is not None and (self._n_records % self.frame_save_interval == 0):
             try:
                 h, w = frame.shape[:2]
                 scale = min(1.0, float(self.img_width) / max(1, w))
@@ -113,10 +125,32 @@ class ExperienceBuffer:
                     while self._buffer:
                         it = self._buffer.popleft()
                         fh.write(json.dumps(it, default=str) + "\n")
-                return str(out.as_posix())
             except Exception:
                 # Requeue on failure
                 return ""
+        self._enforce_cap()
+        return str(out.as_posix())
+
+    def _enforce_cap(self) -> None:
+        """Delete the oldest logs and frames once the buffer folder passes
+        max_bytes, trimming to 90% so it doesn't prune on every flush."""
+        try:
+            files = [(e.stat().st_mtime, e.stat().st_size, e.path)
+                     for d in (self.logs, self.frames) for e in os.scandir(d) if e.is_file()]
+        except OSError:
+            return
+        total = sum(size for _, size, _ in files)
+        if total <= self.max_bytes:
+            return
+        target = 0.9 * self.max_bytes
+        for _, size, path in sorted(files):
+            if total <= target:
+                break
+            try:
+                os.remove(path)
+                total -= size
+            except OSError:
+                pass
 
     def inspect(self, n: int = 10) -> List[Dict]:
         with self._lock:

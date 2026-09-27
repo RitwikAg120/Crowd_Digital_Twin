@@ -169,9 +169,9 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   <span class="sh-sep">|</span>
   <span>Frame</span><span class="sh-v" id="sh-frame">#—</span>
   <span class="sh-sep">|</span>
-  <span>Model</span><span class="sh-v">YOLOv8n + ByteTrack</span>
+  <span>Model</span><span class="sh-v" id="sh-model">YOLO26s + ByteTrack</span>
   <span class="sh-sep">|</span>
-  <span>Datasets</span><span class="sh-v">MOT17 · UCF-CC-50 · ETH/UCY · Mall</span>
+  <span>Datasets</span><span class="sh-v">CrowdHuman · MOT17 · ETH/UCY</span>
   <div class="shsp"></div>
   <span class="sh-v" id="sh-time">—</span>
 </div>
@@ -203,7 +203,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
     <div class="spark" id="sp-speed"></div>
   </div>
   <div class="metric">
-    <div class="m-label">Simulation</div>
+    <div class="m-label">20 s forecast · <a href="/twin" target="_blank" style="color:inherit">3D twin ↗</a></div>
     <div class="m-val" style="font-size:15px;margin-top:4px" id="m-sim">—</div>
     <div class="m-sub" id="m-simreason">—</div>
     <div style="display:flex;gap:4px;margin-top:6px" id="nfr-badges">
@@ -221,7 +221,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
 <!-- LEFT SIDEBAR -->
 <div class="lsb">
   <div class="sec-title">Pipeline</div>
-  <div class="kv-row"><span class="kv-k">Model</span><span class="kv-v">YOLOv8n</span></div>
+  <div class="kv-row"><span class="kv-k">Model</span><span class="kv-v" id="kv-model">YOLO26s</span></div>
   <div class="kv-row"><span class="kv-k">Tracker</span><span class="kv-v">ByteTrack</span></div>
   <div class="kv-row"><span class="kv-k">FPS</span>
     <span style="display:flex;align-items:center;gap:5px">
@@ -234,21 +234,21 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   <div class="kv-row"><span class="kv-k">Frame skip</span><span class="kv-v">Every 2nd</span></div>
   <div class="kv-row"><span class="kv-k">Horizon</span><span class="kv-v">20 s</span></div>
   <div class="kv-row"><span class="kv-k">Zones</span><span class="kv-v">2×3 grid</span></div>
+  <div class="kv-row"><span class="kv-k">Ground</span><span class="kv-v" id="kv-ground">—</span></div>
 
   <div class="sec-title">NFR checks</div>
   <div class="nfr-row"><span class="nfr-k">FPS ≥ 10</span><span class="nfr-pass" id="nfr-fps">—</span></div>
   <div class="nfr-row"><span class="nfr-k">Latency &lt; 2s</span><span class="nfr-pass" id="nfr-lat">—</span></div>
   <div class="nfr-row"><span class="nfr-k">Fusion active</span><span class="nfr-pass">Pass</span></div>
-  <div class="nfr-row"><span class="nfr-k">IoT simulated</span><span class="nfr-pass">Pass</span></div>
-  <div class="nfr-row"><span class="nfr-k">ETH/UCY prior</span><span class="nfr-pass">Active</span></div>
+  <div class="nfr-row"><span class="nfr-k">IoT gates</span><span class="nfr-pass" id="nfr-iot">—</span></div>
+  <div class="nfr-row"><span class="nfr-k">ETH/UCY prior</span><span class="nfr-pass" id="nfr-prior">—</span></div>
 
   <div class="sec-title">Datasets</div>
   <div style="padding:8px 14px;display:flex;flex-wrap:wrap;gap:3px">
+    <span class="ds-tag">CrowdHuman</span>
     <span class="ds-tag">MOT17</span>
-    <span class="ds-tag">UCF-CC-50</span>
     <span class="ds-tag">ETH/UCY</span>
-    <span class="ds-tag">Mall</span>
-    <span class="ds-tag">ShanghaiTech*</span>
+    <span class="ds-tag">UCF-CC-50</span>
   </div>
 
   <div class="sec-title">Fusion weights</div>
@@ -273,7 +273,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   </div>
 
   <div class="cam-wrap" id="cam-wrap">
-    <img id="cam-feed" class="cam-feed" alt="Live heatmap feed">
+    <img id="cam-feed" class="cam-feed" alt="Live detection feed">
     <div id="no-feed" class="no-feed">
       <div class="no-feed-icon">
         <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -284,7 +284,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
       <span style="font-size:11px">Waiting for video pipeline...</span>
       <span style="font-size:10px;font-family:var(--mono);color:rgba(255,255,255,.3)" id="ws-url">ws://localhost:8000/ws</span>
     </div>
-    <div class="cam-overlay-label" id="cam-label">LIVE · YOLOv8n + ByteTrack + Data Fusion</div>
+    <div class="cam-overlay-label" id="cam-label">LIVE · YOLO26s + ByteTrack + Data Fusion</div>
     <div class="cam-fps-badge" id="cam-fps">— FPS</div>
   </div>
 
@@ -308,11 +308,11 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   </div>
 
   <div class="sim-panel">
-    <div class="sp-title">What-if simulation +20 s</div>
+    <div class="sp-title">Digital twin — 20 s forecast</div>
     <div class="fp-row"><span class="fp-k">Trigger</span><span class="fp-v" id="sim-trig">—</span></div>
     <div class="fp-row"><span class="fp-k">Trend slope</span><span class="fp-v" id="sim-slope">—</span></div>
-    <div class="fp-row"><span class="fp-k">Predicted total</span><span class="fp-v" id="sim-pred">—</span></div>
     <div class="fp-row"><span class="fp-k">Fruin LOS</span><span class="fp-v" id="sim-los">—</span></div>
+    <a href="/twin" target="_blank" style="display:block;margin-top:8px;text-align:center;padding:6px;border:1px solid var(--border);border-radius:4px;color:inherit;text-decoration:none;font-size:11px">Open the 3D twin ↗</a>
   </div>
 </div>
 
@@ -367,7 +367,7 @@ const TICKERS = [
   'Zone A: HIGH density detected. Crowd control units advised.',
   'Simulation active — GROWING trend. +20s prediction: scene count increases.',
   'Data fusion: IoT stream agrees with video within δ=5. Confidence HIGH.',
-  'Edge AI pipeline: YOLOv8n · ByteTrack · 3-stream fusion · 10 Hz WebSocket.',
+  'Edge AI pipeline: YOLO26s body + head detectors · ByteTrack · 3-stream fusion · 10 Hz WebSocket.',
   'Fruin Level-of-Service: Zone A approaching Level E (>3 persons/m²).',
   'ETH/UCY mobility priors active. Zone confidence calibrated.',
 ];
@@ -412,12 +412,11 @@ function buildZoneGrid(zones){
         <div class="zc-name">${name.replace('_',' ')}</div>
         <div class="zc-count" id="zcc-${name}">—</div>
         <div class="zc-bar"><div class="zc-fill" id="zcf-${name}" style="width:0%"></div></div>
-        <div class="zc-risk" id="zcr-${name}">—</div>
-        <div class="zc-pred" id="zcp-${name}">pred —</div>`;
+        <div class="zc-risk" id="zcr-${name}">—</div>`;
       cell.onclick=()=>{
         const z=zones[name]||{};
-        const los=(z.density*10).toFixed(2);
-        alert(`${name.replace('_',' ')}\nCount: ${z.count||0} / ${z.capacity||'?'}\nRisk: ${z.risk||'—'}\nDensity: ${(z.density||0).toFixed(4)}\nFruin LOS density: ~${los} p/m²\nFlow: (${z.flow_x||0}, ${z.flow_y||0})\nPredicted +20s: ${z.predicted||0}`);
+        const los=(z.density||0).toFixed(2);
+        alert(`${name.replace('_',' ')}\nCount: ${z.count||0} / ${z.capacity||'?'}\nRisk: ${z.risk||'—'}\nDensity: ${los} p/m² over ${z.area_m2||'?'} m²\nFlow: (${z.flow_x||0}, ${z.flow_y||0}) m/s\nForecast: open the 3D twin (/twin)`);
       };
       g.appendChild(cell);
     });
@@ -434,7 +433,6 @@ function buildZoneGrid(zones){
     if(fEl){fEl.style.width=pct+'%';fEl.style.background=rc}
     const rEl=document.getElementById('zcr-'+name);
     if(rEl){rEl.textContent=z.risk;rEl.style.color=rc}
-    setText('zcp-'+name,'pred '+z.predicted);
   });
 }
 
@@ -493,8 +491,8 @@ function update(d){
 
   const simOn=d.sim_triggered;
   const sEl=document.getElementById('m-sim');
-  if(sEl){sEl.textContent=simOn?'Active · +20s':'Idle';sEl.style.color=simOn?'var(--risk-low)':'var(--risk-med)'}
-  setText('m-simreason',`Trend: ${tr}${rl==='HIGH'?' + HIGH':''}`)
+  if(sEl){sEl.textContent=simOn?'Flagged · see 3D twin':'Idle';sEl.style.color=simOn?'var(--risk-med)':'var(--text2)'}
+  setText('m-simreason',simOn?'Why: '+(d.trigger_reasons||[]).join(' + '):`Trend: ${tr}`)
 
   setText('kv-fps',d.fps+' fps');
   setText('kv-lat',d.latency_ms+' ms');
@@ -506,14 +504,23 @@ function update(d){
   if(nfEl){nfEl.textContent=nfr.fps_pass?'Pass':'Fail';nfEl.className=nfr.fps_pass?'nfr-pass':'nfr-fail'}
   const nlEl=document.getElementById('nfr-lat');
   if(nlEl){nlEl.textContent=nfr.latency_pass?'Pass':'Fail';nlEl.className=nfr.latency_pass?'nfr-pass':'nfr-fail'}
+  setText('nfr-iot',d.fusion?.iot_mode==='live'?'Live':'Simulated');
+  setText('nfr-prior',d.fusion?.mobility_prior==='eth_ucy'?'Active':'Uniform');
+  if(d.model){setText('kv-model',`${d.model} · ${d.device}`);setText('sh-model',`${d.model} + ByteTrack`)}
+  const cal=d.calibration||{};
+  setText('kv-ground',
+    cal.camera_height_m?`${cal.source==='pedestrians'?'est. ':''}cam ${cal.camera_height_m} m · ${Math.round(cal.pitch_deg)}°`:
+    cal.points?`${cal.points}-point calibration`:
+    cal.width_m?`${cal.source==='pedestrians'?'est. ':''}flat ${Math.round(cal.width_m)}×${Math.round(cal.height_m)} m`:'—');
 
   setText('sh-frame','#'+String(frameN).padStart(4,'0'));
   setText('sh-time',new Date().toLocaleTimeString('en-IN'));
 
-  if(d.heatmap_b64){
+  const imageData = d.image_b64;
+  if(imageData){
     const img=document.getElementById('cam-feed');
     const nf=document.getElementById('no-feed');
-    if(img){img.src='data:image/jpeg;base64,'+d.heatmap_b64;img.style.display='block'}
+    if(img){img.src='data:image/jpeg;base64,'+imageData;img.style.display='block'}
     if(nf)nf.style.display='none';
     setText('cam-fps',(d.fps||0)+' FPS');
     setText('cam-label',`LIVE · ${n} tracked · ${rl} risk · Fusion conf ${(d.fusion?.confidence||0).toFixed(2)}`);
@@ -540,12 +547,10 @@ function update(d){
   const occKvEl=document.getElementById('kv-occ');
   if(occKvEl){occKvEl.textContent=f.occlusion_flag?'YES':'No';occKvEl.style.color=f.occlusion_flag?'var(--risk-med)':'var(--risk-low)'}
 
-  // Simulation panel
-  const predTotal=d.zones?Object.values(d.zones).reduce((s,z)=>s+(z.predicted||0),0):0;
-  setText('sim-trig',simOn?'Active':'Idle');
-  const stEl=document.getElementById('sim-trig');if(stEl)stEl.style.color=simOn?'var(--risk-low)':'var(--risk-med)';
+  // Digital twin panel (the forecast itself is in the 3D twin)
+  setText('sim-trig',simOn?'Flagged':'Idle');
+  const stEl=document.getElementById('sim-trig');if(stEl)stEl.style.color=simOn?'var(--risk-med)':'var(--risk-low)';
   setText('sim-slope',(d.trend_slope>=0?'+':'')+d.trend_slope);
-  setText('sim-pred',predTotal);
   // Rough Fruin LOS estimate
   const avgDens=d.zones?Object.values(d.zones).reduce((s,z)=>s+(z.density||0),0)/Object.keys(d.zones).length:0;
   const los=avgDens<0.5?'A (safe)':avgDens<1?'B':avgDens<2?'C':avgDens<3?'D':avgDens<4?'E (caution)':'F (danger)';

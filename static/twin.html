@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crowd Digital Twin — 3D Forecast</title>
+<style>
+:root{
+  --bg:#0a111e;--panel:rgba(12,20,36,.9);--border:#233352;--text:#dde6f4;--text2:#8b9bb8;--text3:#5d6d8b;
+  --accent:#4cc3ff;--low:#2ecc71;--med:#f5a623;--hi:#ff5a4f;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+#view{position:fixed;inset:0}
+.panel{position:fixed;background:var(--panel);border:1px solid var(--border);border-radius:10px;backdrop-filter:blur(8px)}
+#top{top:12px;left:12px;right:12px;display:flex;align-items:center;gap:12px;padding:9px 14px;flex-wrap:wrap}
+#top h1{font-size:15px;margin:0;font-weight:600;white-space:nowrap}
+#top .sub{color:var(--text2);font-size:11px}
+.pill{font:600 10px var(--mono);padding:3px 9px;border-radius:20px;border:1px solid var(--border);white-space:nowrap;color:var(--text2)}
+.spacer{flex:1}
+.btn{background:#16233b;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font:600 11px var(--mono);cursor:pointer;text-decoration:none}
+.btn:hover{border-color:var(--accent)}
+.btn.on{background:#1c3a5e;border-color:var(--accent);color:#fff}
+.btn:disabled{opacity:.35;cursor:default}
+#side{top:74px;right:12px;width:300px;max-height:calc(100% - 160px);overflow:auto;padding:12px 14px}
+#side h2{font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--text2);margin:14px 0 6px}
+#side h2:first-child{margin-top:0}
+table{width:100%;border-collapse:collapse;font:12px var(--mono)}
+th{color:var(--text3);font-weight:500;text-align:right;padding:3px 4px;border-bottom:1px solid var(--border)}
+td{padding:4px;text-align:right;border-bottom:1px solid rgba(35,51,82,.5)}
+th:first-child,td:first-child{text-align:left}
+.kv{display:flex;justify-content:space-between;gap:10px;font:12px var(--mono);padding:2px 0}
+.kv span:first-child{color:var(--text2)}
+.warn{color:var(--hi);font:600 12px var(--mono);margin:6px 0 0}
+.legend{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--text2);margin:4px 0}
+.sw{width:16px;height:10px;border-radius:2px;flex-shrink:0}
+#timeline{left:12px;right:324px;bottom:12px;display:flex;align-items:center;gap:10px;padding:10px 14px}
+#t-slider{flex:1;accent-color:var(--accent)}
+#t-label{font:600 13px var(--mono);min-width:70px;text-align:right}
+#hint{position:fixed;left:16px;bottom:72px;color:var(--text3);font-size:11px}
+#empty{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text2);font-size:14px;pointer-events:none}
+@media (max-width:760px){#side{display:none}#timeline{right:12px}}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<div id="view"></div>
+<div id="empty">Waiting for the twin…</div>
+
+<div id="top" class="panel">
+  <div>
+    <h1>Crowd Digital Twin · 3D</h1>
+    <div class="sub">20 s forecast (social force model) · environment set up from the camera calibration</div>
+  </div>
+  <span class="pill" id="conn">connecting…</span>
+  <span class="pill" id="trig">forecast trigger —</span>
+  <div class="spacer"></div>
+  <button class="btn" id="v-cctv" title="View from the real camera (C)">CCTV view</button>
+  <button class="btn" id="v-orbit" title="Three-quarter view (O)">3/4</button>
+  <button class="btn" id="v-top" title="Top-down (T)">Top</button>
+  <button class="btn on" id="c-speed" title="Colour people by speed">Speed</button>
+  <button class="btn" id="c-risk" title="Colour people by their zone's risk">Zone risk</button>
+  <a class="btn" href="/" target="_blank">Dashboard ↗</a>
+</div>
+
+<div id="side" class="panel">
+  <h2>Zones — now and forecast</h2>
+  <table>
+    <thead><tr><th>Zone</th><th>Now</th><th id="th-t">Now</th><th>Cap</th><th>Full in</th></tr></thead>
+    <tbody id="zones"></tbody>
+  </table>
+  <div id="warnings"></div>
+  <h2>Twin</h2>
+  <div class="kv"><span>People</span><span id="k-people">—</span></div>
+  <div class="kv"><span>Scene risk</span><span id="k-risk">—</span></div>
+  <div class="kv"><span>Ground</span><span id="k-ground">—</span></div>
+  <div class="kv"><span>Walkable floor</span><span id="k-floor">—</span></div>
+  <div class="kv"><span>Forecast</span><span id="k-fc">—</span></div>
+  <h2>Legend</h2>
+  <div class="legend"><span class="sw" style="background:#8a94a6"></span>Wall: the floor ends (learned from people's feet)</div>
+  <div class="legend"><span class="sw" style="background:#4cc3ff;opacity:.6"></span>Edge of the camera's view</div>
+  <div class="legend"><span class="sw" style="background:repeating-linear-gradient(90deg,#5d6d8b 0 4px,transparent 4px 7px)"></span>Too far away to see</div>
+  <div class="legend"><span class="sw" style="background:linear-gradient(90deg,#3fa9f5,#2ecc71,#f5c542,#ff5a4f)"></span>Speed 0 → 2.5 m/s</div>
+  <div class="legend"><span class="sw" style="background:#9fe3ff;opacity:.55"></span>Forecast position and path</div>
+  <div class="legend"><span class="sw" style="background:linear-gradient(90deg,#2ecc71,#f5a623,#ff5a4f)"></span>Zone density 0 → 0.8 p/m² (capacity)</div>
+</div>
+
+<div id="timeline" class="panel">
+  <button class="btn" id="play" title="Play the forecast (space)">▶ Play</button>
+  <button class="btn on" id="live" title="Back to the crowd now">Now</button>
+  <input type="range" id="t-slider" min="0" max="20" step="0.1" value="0" aria-label="Forecast time">
+  <span id="t-label">Now</span>
+</div>
+<div id="hint">Drag to orbit · right-drag to pan · scroll to zoom · space plays the forecast</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Renderer, camera, lights ────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.getElementById('view').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a111e);
+scene.fog = new THREE.Fog(0x0a111e, 90, 320);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 3000);
+camera.position.set(0, 30, 30);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.495;          // stay above the floor
+let userMoved = false;
+controls.addEventListener('start', () => { userMoved = true; });
+
+scene.add(new THREE.HemisphereLight(0xd6e6ff, 0x1a2030, 1.0));
+const sun = new THREE.DirectionalLight(0xffffff, 1.3);
+sun.position.set(-20, 40, 15);
+scene.add(sun);
+
+// Ground metres (X right, Y away from the camera) → three.js (y up, −z away)
+const P = (x, y, h = 0) => new THREE.Vector3(x, h, -y);
+const deg = THREE.MathUtils.degToRad;
+
+// ── Environment, set up from the server's scene ─────────────────────────
+let env = new THREE.Group();
+scene.add(env);
+let sceneData = null, zoneFills = [];
+
+function disposeGroup(g) {
+  g.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    for (const m of [].concat(o.material || [])) { if (m.map) m.map.dispose(); m.dispose(); }
+  });
+}
+const centroid = poly => {
+  let x = 0, y = 0;
+  for (const p of poly) { x += p[0]; y += p[1]; }
+  return [x / poly.length, y / poly.length];
+};
+const polyArea = poly => Math.abs(poly.reduce((s, p, i) => {
+  const q = poly[(i + 1) % poly.length]; return s + p[0] * q[1] - q[0] * p[1];
+}, 0)) / 2;
+
+function flatMesh(poly, material, h) {
+  const g = new THREE.ShapeGeometry(new THREE.Shape(poly.map(([x, y]) => new THREE.Vector2(x, y))));
+  g.rotateX(-Math.PI / 2);                          // (x, y, 0) → (x, 0, −y)
+  const m = new THREE.Mesh(g, material);
+  m.position.y = h;
+  return m;
+}
+function outline(poly, color, h) {
+  const pts = poly.map(([x, y]) => P(x, y, h));
+  pts.push(pts[0].clone());
+  return new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color }));
+}
+function gridLines(poly, step) {
+  // Lines every `step` metres, cut to the (convex) floor
+  const pts = [];
+  const span = (axis, v) => {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      if ((a[axis] - v) * (b[axis] - v) > 0 || a[axis] === b[axis]) continue;
+      const o = a[1 - axis] + (v - a[axis]) / (b[axis] - a[axis]) * (b[1 - axis] - a[1 - axis]);
+      lo = Math.min(lo, o); hi = Math.max(hi, o);
+    }
+    return hi > lo ? [lo, hi] : null;
+  };
+  for (const axis of [0, 1]) {
+    const vals = poly.map(p => p[axis]);
+    for (let v = Math.ceil(Math.min(...vals) / step) * step; v <= Math.max(...vals); v += step) {
+      const s = span(axis, v);
+      if (!s) continue;
+      if (axis === 0) pts.push(P(v, s[0], 0.01), P(v, s[1], 0.01));
+      else pts.push(P(s[0], v, 0.01), P(s[1], v, 0.01));
+    }
+  }
+  return new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),
+                                new THREE.LineBasicMaterial({ color: 0x24324d }));
+}
+function textSprite(text, [x, y], h, size, color = '#8fa6cc') {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 64;
+  const g = c.getContext('2d');
+  g.font = '600 44px system-ui, sans-serif';
+  g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 64, 34);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, depthTest: false, opacity: 0.9 }));
+  sp.position.copy(P(x, y, h));
+  sp.scale.set(size * 2, size, 1);
+  return sp;
+}
+
+function addEdge(e) {
+  const [ax, ay] = e.a, [bx, by] = e.b;
+  const len = Math.hypot(bx - ax, by - ay);
+  if (len < 0.05) return;
+  const mid = P((ax + bx) / 2, (ay + by) / 2);
+  if (e.kind === 'wall' || e.kind === 'view') {
+    // Low-poly slab along the edge: a wall where the floor ends, a low marker at the view's edge
+    const wall = e.kind === 'wall', h = wall ? 2.6 : 0.35;
+    const slab = new THREE.Mesh(
+      new THREE.BoxGeometry(len, h, wall ? 0.25 : 0.06),
+      wall ? new THREE.MeshLambertMaterial({ color: 0x8a94a6, flatShading: true })
+           : new THREE.MeshBasicMaterial({ color: 0x4cc3ff, transparent: true, opacity: 0.28, depthWrite: false }));
+    slab.position.set(mid.x, h / 2, mid.z);
+    slab.rotation.y = Math.atan2(by - ay, bx - ax);
+    env.add(slab);
+  }
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([P(ax, ay, 0.04), P(bx, by, 0.04)]),
+    e.kind === 'range' ? new THREE.LineDashedMaterial({ color: 0x5d6d8b, dashSize: 0.8, gapSize: 0.6 })
+                       : new THREE.LineBasicMaterial({ color: e.kind === 'wall' ? 0xaab4c6 : 0x4cc3ff }));
+  line.computeLineDistances();
+  env.add(line);
+}
+
+function addCameraMarker(c) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.35, 0.8),
+                              new THREE.MeshLambertMaterial({ color: 0xe8eef8, flatShading: true }));
+  const lens = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.55, 4, 1, true),
+                              new THREE.MeshBasicMaterial({ color: 0x4cc3ff, wireframe: true }));
+  lens.rotation.x = Math.PI / 2;                    // opens towards −z, the way the camera looks
+  lens.position.z = -0.65;
+  g.add(body, lens);
+  g.position.copy(P(0, 0, c.height_m));
+  g.rotation.x = -deg(c.pitch_deg);                 // tilted down
+  env.add(g);
+  const pole = new THREE.Line(new THREE.BufferGeometry().setFromPoints([P(0, 0, 0), P(0, 0, c.height_m)]),
+                              new THREE.LineDashedMaterial({ color: 0x8b9bb8, dashSize: 0.3, gapSize: 0.2 }));
+  pole.computeLineDistances();
+  env.add(pole);
+  env.add(textSprite('camera', [0, 0], c.height_m + 0.7, 1.1, '#dde6f4'));
+}
+
+function buildEnvironment(s) {
+  scene.remove(env);
+  disposeGroup(env);
+  env = new THREE.Group();
+  scene.add(env);
+  sceneData = s;
+  agents.clear();                                   // ground coordinates may have changed
+  forecast = null;
+  zoneFills = [];
+  if (!s.floor || s.floor.length < 3) return;
+
+  env.add(flatMesh(s.floor, new THREE.MeshLambertMaterial({ color: 0x18233a }), 0));
+  env.add(gridLines(s.floor, 2));
+  zoneFills = s.zones.map(z => {
+    if (!z.polygon || z.polygon.length < 3) return null;
+    const fill = flatMesh(z.polygon, new THREE.MeshBasicMaterial({
+      color: 0x2ecc71, transparent: true, opacity: 0.16, depthWrite: false }), 0.02);
+    env.add(fill);
+    env.add(outline(z.polygon, 0x3b5074, 0.03));
+    env.add(textSprite(z.name.replace('Zone_', ''), centroid(z.polygon), 0.8,
+                       Math.min(Math.max(Math.sqrt(z.area_m2) / 6, 0.9), 6)));
+    return fill;
+  });
+  for (const e of s.edges) addEdge(e);
+  if (s.camera) addCameraMarker(s.camera);
+
+  const cal = s.calibration || {};
+  setText('k-ground', cal.camera_height_m
+    ? `${cal.source === 'pedestrians' ? 'est. ' : ''}cam ${cal.camera_height_m} m · ${Math.round(cal.pitch_deg)}°`
+    : cal.points ? `${cal.points}-point calibration`
+    : `${cal.source === 'pedestrians' ? 'est. ' : ''}flat ${Math.round(cal.width_m)}×${Math.round(cal.height_m)} m`);
+  setText('k-floor', `${Math.round(polyArea(s.floor))} m²`);
+  horizon = s.horizon_s || 20;
+  slider.max = horizon;
+  document.getElementById('v-cctv').disabled = !s.camera;
+  document.getElementById('empty').style.display = 'none';
+  if (!userMoved) setView(s.camera ? 'cctv' : 'orbit');
+}
+
+// ── Views ───────────────────────────────────────────────────────────────
+function setView(kind) {
+  if (!sceneData || !sceneData.floor.length) return;
+  const floor = sceneData.floor, [cx, cy] = centroid(floor);
+  const ext = Math.max(5, ...floor.map(p => Math.hypot(p[0] - cx, p[1] - cy)));
+  camera.fov = 50;
+  if (kind === 'cctv' && sceneData.camera) {
+    // Where the real camera is, looking where it looks
+    const c = sceneData.camera, [fw, fh] = sceneData.frame_size || [16, 9];
+    camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(deg(c.hfov_deg) / 2) * fh / fw));
+    camera.position.copy(P(0, 0, c.height_m));
+    controls.target.copy(P(0, c.height_m / Math.max(Math.tan(deg(c.pitch_deg)), 0.05), 0));
+  } else if (kind === 'top') {
+    camera.position.copy(P(cx, cy - 0.01, ext * 2.4));
+    controls.target.copy(P(cx, cy, 0));
+  } else {
+    camera.position.copy(P(cx - ext * 0.9, cy - ext * 1.4, ext * 1.1));
+    controls.target.copy(P(cx, cy, 0));
+  }
+  camera.updateProjectionMatrix();
+  controls.update();
+  for (const k of ['cctv', 'orbit', 'top']) document.getElementById('v-' + k).classList.toggle('on', k === kind);
+}
+
+// ── Crowd: low-poly proxies (instanced) ─────────────────────────────────
+const MAX = 4000;
+const bodyGeo = new THREE.CylinderGeometry(0.19, 0.24, 1.38, 6);    // hexagonal torso + legs
+bodyGeo.translate(0, 0.69, 0);
+const headGeo = new THREE.IcosahedronGeometry(0.13, 0);             // 20-face head
+headGeo.translate(0, 1.56, 0);
+const arrowGeo = new THREE.BufferGeometry().setFromPoints([          // heading marker on the floor
+  new THREE.Vector3(0.62, 0.03, 0), new THREE.Vector3(0.28, 0.03, -0.16), new THREE.Vector3(0.28, 0.03, 0.16)]);
+
+function instanced(geo, mat) {
+  const m = new THREE.InstancedMesh(geo, mat, MAX);
+  m.count = 0;
+  m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  m.frustumCulled = false;
+  scene.add(m);
+  return m;
+}
+const liveBodyMat = new THREE.MeshLambertMaterial({ flatShading: true, transparent: true });
+const liveHeadMat = new THREE.MeshLambertMaterial({ color: 0xf1f4f9, flatShading: true, transparent: true });
+const live = { body: instanced(bodyGeo, liveBodyMat), head: instanced(headGeo, liveHeadMat) };
+live.body.setColorAt(0, new THREE.Color(0xffffff));   // per-person colours from the start
+const arrows = instanced(arrowGeo, new THREE.MeshBasicMaterial({
+  color: 0xffffff, transparent: true, opacity: 0.75, side: THREE.DoubleSide, depthWrite: false }));
+const ghostMat = new THREE.MeshLambertMaterial({ color: 0x9fe3ff, flatShading: true, transparent: true,
+                                                 opacity: 0.4, depthWrite: false });
+const ghost = { body: instanced(bodyGeo, ghostMat), head: instanced(headGeo, ghostMat) };
+
+const STEPS_MAX = 64;
+const trailPos = new Float32Array(MAX * STEPS_MAX * 6);
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3).setUsage(THREE.DynamicDrawUsage));
+const trails = new THREE.LineSegments(trailGeo, new THREE.LineBasicMaterial({
+  color: 0x9fe3ff, transparent: true, opacity: 0.28, depthWrite: false }));
+trails.frustumCulled = false;
+scene.add(trails);
+
+const SPEED_STOPS = [[0, 0x3fa9f5], [0.8, 0x2ecc71], [1.6, 0xf5c542], [2.5, 0xff5a4f]]
+  .map(([v, c]) => [v, new THREE.Color(c)]);
+const RISK = { LOW: new THREE.Color(0x2ecc71), MEDIUM: new THREE.Color(0xf5a623), HIGH: new THREE.Color(0xff5a4f) };
+function speedColor(v, out) {
+  for (let i = 1; i < SPEED_STOPS.length; i++) {
+    const [v1, c1] = SPEED_STOPS[i], [v0, c0] = SPEED_STOPS[i - 1];
+    if (v <= v1) return out.copy(c0).lerp(c1, Math.max(0, (v - v0) / (v1 - v0)));
+  }
+  return out.copy(SPEED_STOPS[SPEED_STOPS.length - 1][1]);
+}
+function densityColor(d, out) {
+  const t = Math.min(d / 0.8, 1);
+  return t < 0.5 ? out.copy(RISK.LOW).lerp(RISK.MEDIUM, t * 2) : out.copy(RISK.MEDIUM).lerp(RISK.HIGH, (t - 0.5) * 2);
+}
+
+const agents = new Map();                          // id → {x, y, tx, ty, vx, vy, speed, zone}
+let state = null, forecast = null;
+let colorMode = 'speed';
+const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), yAxis = new THREE.Vector3(0, 1, 0);
+const one = new THREE.Vector3(1, 1, 1), tmpV = new THREE.Vector3(), tmpS = new THREE.Vector3(), col = new THREE.Color();
+
+function onState(m) {
+  const seen = new Set();
+  for (const [id, x, y, vx, vy, speed, zone] of m.agents) {
+    seen.add(id);
+    const a = agents.get(id);
+    if (a) Object.assign(a, { tx: x, ty: y, vx, vy, speed, zone });
+    else agents.set(id, { x, y, tx: x, ty: y, vx, vy, speed, zone });
+  }
+  for (const id of [...agents.keys()]) if (!seen.has(id)) agents.delete(id);
+  state = m;
+  setText('k-people', m.agents.length);
+  const r = m.risk || {};
+  const rEl = document.getElementById('k-risk');
+  rEl.textContent = r.label ? `${r.label} ${r.score.toFixed(2)}` : '—';
+  rEl.style.color = r.label === 'HIGH' ? 'var(--hi)' : r.label === 'MEDIUM' ? 'var(--med)' : 'var(--low)';
+  const t = m.trigger || {}, tEl = document.getElementById('trig');
+  tEl.textContent = t.active ? `forecast flagged: ${t.reasons.join(' + ')}` : 'no forecast trigger';
+  tEl.style.color = t.active ? 'var(--med)' : 'var(--text2)';
+  tEl.style.borderColor = t.active ? 'var(--med)' : 'var(--border)';
+}
+
+function drawLive(dt) {
+  const k = 1 - Math.exp(-dt * 10);               // glide towards the latest positions
+  const fading = forecast && tNow > 0.001;
+  liveBodyMat.opacity = liveHeadMat.opacity = fading ? 0.25 : 1;
+  let i = 0, n = 0;
+  for (const a of agents.values()) {
+    if (i >= MAX) break;
+    a.x += (a.tx - a.x) * k;
+    a.y += (a.ty - a.y) * k;
+    q.setFromAxisAngle(yAxis, Math.atan2(a.vy, a.vx));
+    tmpV.set(a.x, 0, -a.y);
+    m4.compose(tmpV, q, one);
+    live.body.setMatrixAt(i, m4);
+    live.head.setMatrixAt(i, m4);
+    live.body.setColorAt(i, colorMode === 'speed' ? speedColor(a.speed, col)
+      : col.copy(RISK[state?.zones?.[a.zone]?.risk] || RISK.LOW));
+    if (a.speed > 0.25 && !fading) {
+      tmpS.set(0.6 + Math.min(a.speed, 2.5) * 0.5, 1, 1);
+      m4.compose(tmpV, q, tmpS);
+      arrows.setMatrixAt(n++, m4);
+    }
+    i++;
+  }
+  live.body.count = live.head.count = i;
+  arrows.count = n;
+  live.body.instanceMatrix.needsUpdate = live.head.instanceMatrix.needsUpdate = true;
+  arrows.instanceMatrix.needsUpdate = true;
+  if (live.body.instanceColor) live.body.instanceColor.needsUpdate = true;
+}
+
+function drawForecast() {
+  const show = !!forecast && tNow > 0.001 && sceneData && forecast.scene_version === sceneData.version;
+  ghost.body.visible = ghost.head.visible = trails.visible = show;
+  if (!show) return;
+  const steps = forecast.steps, f = Math.min(tNow / forecast.step_s, steps);
+  const k0 = Math.floor(f), k1 = Math.min(k0 + 1, steps), fr = f - k0;
+  let i = 0, v = 0;
+  for (const path of forecast.paths) {
+    if (i >= MAX) break;
+    const x0 = path[2 * k0], y0 = path[2 * k0 + 1], x1 = path[2 * k1], y1 = path[2 * k1 + 1];
+    const x = x0 + (x1 - x0) * fr, y = y0 + (y1 - y0) * fr;
+    q.setFromAxisAngle(yAxis, Math.atan2(y1 - y0, x1 - x0));
+    m4.compose(tmpV.set(x, 0, -y), q, one);
+    ghost.body.setMatrixAt(i, m4);
+    ghost.head.setMatrixAt(i, m4);
+    // Path walked so far, from now to the current forecast time
+    for (let s = 0; s <= k0 && v + 6 <= trailPos.length; s++) {
+      trailPos[v]     = path[2 * s];
+      trailPos[v + 1] = 0.05;
+      trailPos[v + 2] = -path[2 * s + 1];
+      trailPos[v + 3] = s < k0 ? path[2 * s + 2] : x;
+      trailPos[v + 4] = 0.05;
+      trailPos[v + 5] = -(s < k0 ? path[2 * s + 3] : y);
+      v += 6;
+    }
+    i++;
+  }
+  ghost.body.count = ghost.head.count = i;
+  ghost.body.instanceMatrix.needsUpdate = ghost.head.instanceMatrix.needsUpdate = true;
+  trailGeo.setDrawRange(0, v / 3);
+  trailGeo.attributes.position.needsUpdate = true;
+}
+
+function forecastStep() {
+  return forecast && tNow > 0.001 && sceneData && forecast.scene_version === sceneData.version
+    ? Math.min(Math.round(tNow / forecast.step_s), forecast.steps) : null;
+}
+
+function colorZones() {
+  if (!sceneData) return;
+  const k = forecastStep();
+  sceneData.zones.forEach((z, i) => {
+    const fill = zoneFills[i];
+    if (!fill) return;
+    if (k !== null) {
+      const d = forecast.zones[i]?.density[k] ?? 0;
+      densityColor(d, fill.material.color);
+      fill.material.opacity = 0.16 + Math.min(d / 0.8, 1) * 0.3;
+    } else {
+      const r = state?.zones?.[i]?.risk || 'LOW';
+      fill.material.color.copy(RISK[r] || RISK.LOW);
+      fill.material.opacity = r === 'LOW' ? 0.14 : 0.3;
+    }
+  });
+}
+
+function updatePanel() {
+  if (!sceneData) return;
+  const k = forecastStep();
+  const kk = k ?? 0;
+  setText('th-t', k ? `+${Math.round(k * forecast.step_s)} s` : 'Now');
+  const ok = forecast && forecast.scene_version === sceneData.version;
+  document.getElementById('zones').innerHTML = sceneData.zones.map((z, i) => {
+    const fz = ok ? forecast.zones[i] : null;
+    const at = fz ? fz.counts[kk] : '—';
+    const over = fz && fz.counts[kk] >= z.capacity;
+    const full = fz ? fz.full_at_s : null;
+    return `<tr><td>${z.name.replace('Zone_', '')}</td><td>${state?.zones?.[i]?.count ?? '—'}</td>` +
+           `<td style="color:${over ? 'var(--hi)' : 'inherit'}">${at}</td><td>${z.capacity}</td>` +
+           `<td style="color:${full != null ? 'var(--hi)' : 'var(--text3)'}">${full == null ? '—' : full === 0 ? 'now' : full + ' s'}</td></tr>`;
+  }).join('');
+  document.getElementById('warnings').innerHTML = ok ? forecast.zones
+    .filter(z => z.full_at_s != null)
+    .map(z => `<div class="warn">⚠ ${z.name.replace('_', ' ')} ${z.full_at_s === 0 ? 'is at' : 'reaches'} capacity${z.full_at_s ? ' in ' + z.full_at_s + ' s' : ''}</div>`)
+    .join('') : '';
+  setText('k-fc', forecast ? `${forecast.compute_ms} ms · ${Math.max(0, Date.now() / 1000 - forecast.t0).toFixed(1)} s ago` : '—');
+}
+
+// ── Timeline ─────────────────────────────────────────────────────────────
+const slider = document.getElementById('t-slider');
+const playBtn = document.getElementById('play'), liveBtn = document.getElementById('live');
+let tNow = 0, playing = false, horizon = 20;
+function setTime(t) {
+  tNow = Math.max(0, Math.min(t, horizon));
+  slider.value = tNow;
+  setText('t-label', tNow > 0.001 ? `+${tNow.toFixed(1)} s` : 'Now');
+  liveBtn.classList.toggle('on', tNow <= 0.001);
+}
+function setPlaying(p) {
+  playing = p;
+  playBtn.textContent = p ? '❚❚ Pause' : '▶ Play';
+  playBtn.classList.toggle('on', p);
+}
+slider.addEventListener('input', () => { setPlaying(false); setTime(+slider.value); });
+playBtn.addEventListener('click', () => { if (!playing && tNow >= horizon - 0.05) setTime(0); setPlaying(!playing); });
+liveBtn.addEventListener('click', () => { setPlaying(false); setTime(0); });
+
+// ── Buttons, keys, resize ───────────────────────────────────────────────
+function setText(id, t) { const e = document.getElementById(id); if (e) e.textContent = t; }
+for (const k of ['cctv', 'orbit', 'top']) document.getElementById('v-' + k).addEventListener('click', () => setView(k));
+function setColorMode(m) {
+  colorMode = m;
+  document.getElementById('c-speed').classList.toggle('on', m === 'speed');
+  document.getElementById('c-risk').classList.toggle('on', m === 'risk');
+}
+document.getElementById('c-speed').addEventListener('click', () => setColorMode('speed'));
+document.getElementById('c-risk').addEventListener('click', () => setColorMode('risk'));
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.key !== ' ') return;
+  if (e.key === ' ') { e.preventDefault(); playBtn.click(); }
+  else if (e.key === 'c') setView('cctv');
+  else if (e.key === 't') setView('top');
+  else if (e.key === 'o') setView('orbit');
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Connection ──────────────────────────────────────────────────────────
+let ws, lastSceneAsk = 0;
+function connect() {
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/twin`);
+  const c = document.getElementById('conn');
+  ws.onopen = () => { c.textContent = 'live'; c.style.color = 'var(--low)'; c.style.borderColor = 'var(--low)'; };
+  ws.onclose = () => {
+    c.textContent = 'reconnecting…'; c.style.color = 'var(--med)'; c.style.borderColor = 'var(--med)';
+    setTimeout(connect, 2000);
+  };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'scene') buildEnvironment(m);
+    else if (m.type === 'state') {
+      if ((!sceneData || m.scene_version !== sceneData.version) && Date.now() - lastSceneAsk > 1000) {
+        lastSceneAsk = Date.now();
+        ws.send('scene');
+      }
+      onState(m);
+    } else if (m.type === 'forecast') forecast = m;
+  };
+}
+connect();
+
+// ── Render loop ─────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+let panelTimer = 0;
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (playing) {                                     // 20 s of forecast in 8 s, looping
+    let t = tNow + dt * horizon / 8;
+    if (t > horizon) t = 0;
+    setTime(t);
+  }
+  drawLive(dt);
+  drawForecast();
+  colorZones();
+  if ((panelTimer += dt) > 0.25) { panelTimer = 0; updatePanel(); }
+  controls.update();
+  renderer.render(scene, camera);
+}
+frame();
+</script>
+</body>
+</html>

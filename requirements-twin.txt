@@ -1,0 +1,6 @@
+# Twin-only mode (python main.py --replay ...): no PyTorch, YOLO or GPU needed.
+numpy>=1.26.4
+scipy>=1.13.0
+opencv-python-headless>=4.10.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.1
