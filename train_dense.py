@@ -4,17 +4,27 @@ Train the dense-crowd head-point model (dense.P2PNet) — run this on the GB10.
     python train_dense.py --data crowdhuman:dataset/CrowdHuman \\
                           --init imagenet --epochs 100 --amp --out weights/p2pnet_crowd.pth
 
+    # dense crowds in fog, rain and from high up: fine-tune on JHU-Crowd++ too
+    python train_dense.py --data crowdhuman:dataset/CrowdHuman --data jhu:dataset/JHU-Crowd@4 \\
+                          --init weights/p2pnet_crowd.pth --lr 5e-5 --lr-backbone 5e-6 \\
+                          --epochs 60 --amp --out weights/p2pnet_crowd_jhu.pth
+
     # then fine-tune on your own annotated frames (points format)
     python train_dense.py --data points:dataset/kumbh_points --init weights/p2pnet_crowd.pth \\
                           --epochs 60 --lr 5e-5 --out weights/p2pnet_crowd_kumbh.pth
 
-Datasets (--data kind:path, repeatable; train on their train split, validate
-on val/test):
+Datasets (--data kind:path[@N], repeatable; train on their train split, N
+times over with @N so a small set isn't swamped, and validate on val/test —
+an equal share of --val-max from each dataset):
   crowdhuman  CrowdHuman folder: annotation_train.odgt, annotation_val.odgt and the
               images (anywhere below it, e.g. Images/). Every person's head box
               (hbox) centre is a head point; "mask" regions (unlabelled crowds) and
               heads marked ignore are blanked out, so the model isn't taught that
               people there are background.
+  jhu         JHU-Crowd++ v2.0 folder (jhu-crowd.net): {train,val,test}/images/*.jpg and
+              gt/*.txt, one "x y w h occlusion blur" line per head; 4,372 dense crowd
+              images (up to 25,000 people) labelled by weather — fog/haze, rain, snow —
+              and scene, from street level to high above. Validation is its val split.
   points      your own: {train,test}/<name>.jpg + <name>.txt with one "x y" head point
               per line (tools/annotate_points.py writes these)
 
@@ -90,6 +100,27 @@ def crowdhuman_samples(root: Path, split: str):
     return out
 
 
+def jhu_samples(root: Path, split: str):
+    """
+    JHU-Crowd++ v2.0: [(image, (N, 2) head points, [])]. The split folder
+    (train, or val for validation) may sit below `root` (the zip unpacks to
+    jhu_crowd_v2.0/).
+    """
+    name = "train" if split == "train" else "val"
+    d = next(iter(sorted(p for p in root.rglob(name) if (p / "images").is_dir() and (p / "gt").is_dir())),
+             None)
+    if d is None:
+        return []
+    out = []
+    for img in sorted(p for p in (d / "images").glob("*") if p.suffix.lower() in IMG_EXT):
+        txt = d / "gt" / f"{img.stem}.txt"
+        pts = np.zeros((0, 2))
+        if txt.exists() and txt.stat().st_size:
+            pts = np.loadtxt(txt, ndmin=2)[:, :2]
+        out.append((img, pts, []))
+    return out
+
+
 def list_samples(kind: str, root: str, split: str):
     """
     [(image path, (N, 2) head points, [ignore boxes])] for one dataset split
@@ -98,6 +129,8 @@ def list_samples(kind: str, root: str, split: str):
     r = Path(root)
     if kind == "crowdhuman":
         return crowdhuman_samples(r, split)
+    if kind == "jhu":
+        return jhu_samples(r, split)
     if kind == "points":
         d = r / ("train" if split == "train" else "test")
         out = []
@@ -106,7 +139,7 @@ def list_samples(kind: str, root: str, split: str):
             pts = np.loadtxt(txt, ndmin=2)[:, :2] if txt.exists() and txt.stat().st_size else np.zeros((0, 2))
             out.append((img, pts, []))
         return out
-    raise SystemExit(f"Unknown dataset kind {kind!r} (use crowdhuman or points)")
+    raise SystemExit(f"Unknown dataset kind {kind!r} (use crowdhuman, jhu or points)")
 
 
 def load_image(path, pts, max_side: int, ignore=()):
@@ -256,17 +289,22 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    train, val = [], []
+    train, vals = [], []
     for spec in args.data:
         kind, root = spec.split(":", 1)
+        root, _, times = root.partition("@")
         tr, te = list_samples(kind, root, "train"), list_samples(kind, root, "test")
-        print(f"  {kind}: {len(tr)} train / {len(te)} validation images from {root}")
-        train += tr
-        val += te
+        print(f"  {kind}: {len(tr)} train{f' (× {times})' if times else ''} / "
+              f"{len(te)} validation images from {root}")
+        train += tr * int(times or 1)
+        vals.append(te)
     if not train:
         raise SystemExit("No training images found.")
-    if args.val_max and len(val) > args.val_max:
-        val = random.sample(val, args.val_max)
+    # The same fixed validation images every epoch, an equal share from each dataset
+    val = []
+    for te in vals:
+        k = args.val_max // max(1, sum(bool(v) for v in vals)) if args.val_max else len(te)
+        val += random.sample(te, k) if len(te) > k else te
 
     model = build_model(args.init, args.device)
     backbone = [p for n, p in model.named_parameters() if n.startswith("backbone.")]

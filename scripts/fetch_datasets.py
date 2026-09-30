@@ -1,5 +1,5 @@
 """
-Get the datasets the project uses — MOT17 and CrowdHuman — on the GB10.
+Get the datasets the project uses — MOT17, CrowdHuman and JHU-Crowd++ — on the GB10.
 
     python scripts/fetch_datasets.py all                 # MOT17 sequences + CrowdHuman check
     python scripts/fetch_datasets.py mot17 --mot-seqs 02 04 09 11
@@ -12,6 +12,9 @@ Where they go (the paths evaluate.py / train_dense.py / scripts/run_gb10.sh use)
               and the images (the CrowdHuman_train0*.zip / CrowdHuman_val.zip contents,
               e.g. Images/). CrowdHuman needs its licence accepted at crowdhuman.org, so it
               is not downloaded here: this checks that it is in place and complete.
+  jhu         dataset/JHU-Crowd/                    JHU-Crowd++ v2.0 (dense crowds, fog/rain/snow,
+              high views) for the head-point model; like CrowdHuman, its terms are
+              accepted by you at crowd-counting.com, and this only checks it.
 """
 
 import argparse
@@ -148,7 +151,25 @@ def check_crowdhuman(args):
               + ("" if found == len(ids) else "  ← unzip the missing image archives"))
 
 
-FETCHERS = {"mot17": fetch_mot17, "crowdhuman": check_crowdhuman}
+def check_jhu(args):
+    root = DATA / "JHU-Crowd"
+    splits = {s: next(iter(sorted(p for p in root.rglob(s) if (p / "images").is_dir())), None)
+              for s in ("train", "val", "test")} if root.exists() else {}
+    if not any(splits.values()):
+        print("  dataset/JHU-Crowd not found. Download JHU-Crowd++ v2.0 from http://www.crowd-counting.com/ "
+              "(accept its terms) and unzip it there, so that dataset/JHU-Crowd/.../{train,val,test} "
+              "each hold images/ and gt/.")
+        return
+    for s, d in splits.items():
+        if d is None:
+            print(f"  missing {s}/ (images/ + gt/) under dataset/JHU-Crowd")
+            continue
+        imgs = [p for p in (d / "images").glob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png")]
+        gts = sum((d / "gt" / f"{p.stem}.txt").exists() for p in imgs)
+        print(f"  {s}: {len(imgs)} images, {gts} with head points ({d.relative_to(ROOT).as_posix()})")
+
+
+FETCHERS = {"mot17": fetch_mot17, "crowdhuman": check_crowdhuman, "jhu": check_jhu}
 
 
 def main():

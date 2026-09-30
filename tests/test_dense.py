@@ -67,8 +67,13 @@ def test_calibration_from_heads_only():
     return why
 
 
+def _fake_pipeline():
+    return SimpleNamespace(_heads_of_bodies=CDTPipeline._heads_of_bodies,
+                           _merge_points=CDTPipeline._merge_points)
+
+
 def test_heads_without_bodies_become_people():
-    fake = SimpleNamespace(_inside_any=CDTPipeline._inside_any)
+    fake = _fake_pipeline()
     bodies = np.array([[100, 100, 140, 220]], np.float32)
     heads = [{"box": [112, 102, 126, 118], "confidence": 0.6},     # this body's own head
              {"box": [300, 50, 310, 62], "confidence": 0.3}]       # someone the body detector missed
@@ -77,6 +82,25 @@ def test_heads_without_bodies_become_people():
     pts = (np.array([[120.0, 110.0], [400.0, 60.0], [410.0, 62.0]]), np.array([0.9, 0.8, 0.7]))
     boxes, conf, src = CDTPipeline._unmatched_heads(fake, bodies, heads, pts)
     assert len(boxes) == 2 and src == ["point", "point"]
+
+
+def test_nobody_is_counted_twice():
+    from dense import HeadScale
+    fake = _fake_pipeline()
+    bodies = np.array([[100, 100, 140, 220],                        # head pokes out above the box
+                       [200, 100, 240, 220]], np.float32)
+    pts = np.array([[120.0, 96.0],                                  # body 1's head, just above its box
+                    [220.0, 108.0], [221.0, 110.0],                 # body 2's head, found twice
+                    [212.0, 150.0],                                 # someone behind body 2
+                    [400.0, 60.0], [401.5, 61.0]])                  # a missed person, found twice
+    sc = np.array([0.9, 0.9, 0.6, 0.8, 0.8, 0.55])
+    hs = HeadScale()
+    hs.add([{"box": [0, y - 5, 10, y + 5], "confidence": 0.8} for y in np.linspace(20, 400, 60)])
+    boxes, _, _ = CDTPipeline._unmatched_heads(fake, bodies, [], (pts, sc), hs)
+    centres = (boxes[:, :2] + boxes[:, 2:]) / 2
+    assert len(boxes) == 2, centres
+    assert np.allclose(sorted(centres[:, 0]), [212, 400]), centres
+    return "2 bodies + 6 points → 4 people"
 
 
 def test_head_points_sized_by_perspective():
@@ -93,7 +117,7 @@ def test_head_points_sized_by_perspective():
     got = hs.predict([50, 400])
     assert np.allclose(got, [5.5, 16.0], atol=0.6), got
     # Sparse points (the point model missed their neighbours) still get head-sized boxes
-    fake = SimpleNamespace(_inside_any=CDTPipeline._inside_any)
+    fake = _fake_pipeline()
     pts = (np.array([[100.0, 50.0], [600.0, 400.0]]), np.array([0.9, 0.8]))
     boxes, _, _ = CDTPipeline._unmatched_heads(fake, np.zeros((0, 4), np.float32), [], pts, hs)
     assert np.allclose(boxes[:, 2] - boxes[:, 0], got, atol=1e-3)
@@ -187,6 +211,25 @@ def test_crowdhuman_heads_and_ignore_regions():
     img, _ = load_image(path, pts, 2048, ignore)
     assert (img[60, 160] != 200).all() and (img[80, 100] == 200).all()   # the mask is blanked
     assert len(list_samples("crowdhuman", str(root), "test")) == 1
+
+
+def test_jhu_crowd_points():
+    if not _torch():
+        return "skipped (no PyTorch in this environment)"
+    import cv2
+    from train_dense import list_samples
+    root = Path(tempfile.mkdtemp())
+    for split, n in (("train", 2), ("val", 1)):
+        d = root / "jhu_crowd_v2.0" / split
+        (d / "images").mkdir(parents=True)
+        (d / "gt").mkdir()
+        for i in range(n):
+            cv2.imwrite(str(d / "images" / f"{i:04d}.jpg"), np.zeros((40, 60, 3), np.uint8))
+            gt = "10 12 4 4 1 0\n30 20 5 5 2 1\n" if i == 0 else ""
+            (d / "gt" / f"{i:04d}.txt").write_text(gt)
+    tr, va = list_samples("jhu", str(root), "train"), list_samples("jhu", str(root), "test")
+    assert len(tr) == 2 and len(va) == 1
+    assert np.allclose(tr[0][1], [[10, 12], [30, 20]]) and tr[1][1].shape == (0, 2)
 
 
 if __name__ == "__main__":

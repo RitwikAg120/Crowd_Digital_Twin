@@ -86,6 +86,11 @@ def main():
     env["CROWDHUMAN_OK"] = int(has_ch)
     print(f"{'ok  ' if has_ch else 'none'} CrowdHuman: "
           f"{'annotations found' if has_ch else 'dataset/CrowdHuman with annotation_{train,val}.odgt not found'}")
+    jhu = Path("dataset/JHU-Crowd")
+    has_jhu = jhu.exists() and any((p / "images").is_dir() for p in jhu.rglob("train"))
+    env["JHU_OK"] = int(has_jhu)
+    print(f"{'ok  ' if has_jhu else 'none'} JHU-Crowd++: "
+          f"{'train split found' if has_jhu else 'dataset/JHU-Crowd not found (optional: dense fine-tune)'}")
     kp = Path("dataset/kumbh_points/train")
     env["KUMBH_POINTS_OK"] = int(kp.exists() and any(kp.glob("*.txt")))
     vids = sorted(p.name for p in Path("videos").glob("*.mp4")) if Path("videos").exists() else []

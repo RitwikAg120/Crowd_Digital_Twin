@@ -2527,8 +2527,8 @@ class CDTPipeline(TwinPipeline):
             bodies, hbox_detections, self._points_last if use_points else None,
             self.head_scale)
         if Config.DENSE_AUTO:
-            n_x = len([h for h in hbox_detections
-                       if not self._inside_any(h["box"], bodies)])
+            hb = np.array([h["box"] for h in hbox_detections], np.float32).reshape(-1, 4)
+            n_x = int((~self._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, bodies)).sum())
             if use_points:                      # the point model sees heads the detector can't
                 n_x = max(n_x, int((np.array(extra_src) == "point").sum()))
             on  = n_x >= Config.DENSE_MIN_HEADS and n_x >= Config.DENSE_HEAD_RATIO * len(bodies)
@@ -2605,13 +2605,47 @@ class CDTPipeline(TwinPipeline):
         )
 
     @staticmethod
-    def _inside_any(box, bodies: np.ndarray) -> bool:
-        """Is the centre of `box` inside any body box (the same person)?"""
-        if not len(bodies):
-            return False
-        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-        return bool(((bodies[:, 0] <= cx) & (cx <= bodies[:, 2]) &
-                     (bodies[:, 1] <= cy) & (cy <= bodies[:, 3])).any())
+    def _heads_of_bodies(centres, bodies: np.ndarray) -> np.ndarray:
+        """
+        Which heads (centres, (N, 2)) belong to a body box — the same person,
+        not someone to add. Each body owns at most one head: the one nearest
+        where its head should be (top centre), within its width and from a
+        little above its top (heads poke out of the box) to 30% down. The
+        rest are other people, even inside a body box — in a dense crowd
+        that is someone standing behind. Returns a boolean mask.
+        """
+        c = np.asarray(centres, float).reshape(-1, 2)
+        owned = np.zeros(len(c), bool)
+        b = np.asarray(bodies, float).reshape(-1, 4)
+        if not len(c) or not len(b):
+            return owned
+        from scipy.optimize import linear_sum_assignment
+        bw, bh = b[:, 2] - b[:, 0], b[:, 3] - b[:, 1]
+        hx, hy = (b[:, 0] + b[:, 2]) / 2, b[:, 1] + 0.08 * bh           # where the head should be
+        dx = (c[None, :, 0] - hx[:, None]) / (0.5 * bw[:, None] + 1e-6)
+        dy = (c[None, :, 1] - hy[:, None]) / (0.22 * bh[:, None] + 1e-6)
+        ok = (np.abs(dx) <= 1) & (c[None, :, 1] >= b[:, 1, None] - 0.15 * bh[:, None]) & \
+             (c[None, :, 1] <= b[:, 1, None] + 0.3 * bh[:, None])
+        cost = np.where(ok, dx ** 2 + dy ** 2, 1e6)
+        rows, cols = linear_sum_assignment(cost)
+        owned[cols[cost[rows, cols] < 1e6]] = True
+        return owned
+
+    @staticmethod
+    def _merge_points(pts: np.ndarray, scores: np.ndarray, size: np.ndarray) -> np.ndarray:
+        """
+        Indices of head points kept after merging points on the same head: the
+        point model's rare doubles sit within a few pixels, while neighbours
+        in a dense crowd can be only half a head apart, so the radius is small.
+        """
+        order = np.argsort(-np.asarray(scores))
+        tree, keep, dropped = cKDTree(pts), [], np.zeros(len(pts), bool)
+        for i in order:
+            if dropped[i]:
+                continue
+            keep.append(i)
+            dropped[tree.query_ball_point(pts[i], min(0.35 * size[i], 4.0))] = True
+        return np.sort(np.array(keep, int))
 
     @staticmethod
     def _scale_boxes(boxes, k: float) -> np.ndarray:
@@ -2638,20 +2672,27 @@ class CDTPipeline(TwinPipeline):
         points (dense model) the points are used — they find far more heads —
         each given a head box sized for its row by `head_scale` (dense.HeadScale,
         learned from the head detector), else by how close its neighbours are.
+        Points on the same head are merged (when head sizes are known), and
+        each body box claims its own head (_heads_of_bodies), so nobody is
+        counted twice.
         """
         if not Config.HEADS_AS_PEOPLE:
             return np.zeros((0, 4), np.float32), np.zeros(0), []
         if points is not None and len(points[0]):
             from dense import head_sizes
-            pts, sc = points
+            pts, sc = np.asarray(points[0], float), np.asarray(points[1], float)
             size = head_scale.predict(pts[:, 1]) if head_scale is not None else None
+            if size is not None:
+                m = self._merge_points(pts, sc, size)
+                pts, sc, size = pts[m], sc[m], size[m]
             s = (size if size is not None else head_sizes(pts)) / 2
             boxes = np.column_stack([pts[:, 0] - s, pts[:, 1] - s, pts[:, 0] + s, pts[:, 1] + s])
-            keep = [i for i, b in enumerate(boxes) if not self._inside_any(b, bodies)]
-            return boxes[keep].astype(np.float32), sc[keep], ["point"] * len(keep)
-        keep = [h for h in heads if not self._inside_any(h["box"], bodies)]
-        return (np.array([h["box"] for h in keep], np.float32).reshape(-1, 4),
-                np.array([h["confidence"] for h in keep], float), ["head"] * len(keep))
+            keep = ~self._heads_of_bodies(pts, bodies)
+            return boxes[keep].astype(np.float32), sc[keep], ["point"] * int(keep.sum())
+        hb = np.array([h["box"] for h in heads], np.float32).reshape(-1, 4)
+        keep = ~self._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, bodies)
+        return (hb[keep], np.array([h["confidence"] for h in heads], float).reshape(-1)[keep],
+                ["head"] * int(keep.sum()))
 
     def stop(self):
         super().stop()

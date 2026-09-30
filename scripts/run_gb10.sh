@@ -7,7 +7,7 @@
 #
 #   bash scripts/gb10_setup.sh                      # once
 #   python scripts/fetch_datasets.py all            # MOT17 sequences + CrowdHuman check
-#   bash scripts/run_gb10.sh [measure|mot17|train|all]    # default: all
+#   bash scripts/run_gb10.sh [measure|mot17|train|jhu|all]    # default: all
 #
 # Needs, besides the code: weights/yolo26strained.pt and weights/yoloheadv26s.pt
 # (not in git — copy them from the laptop), dataset/MOT17 and dataset/CrowdHuman,
@@ -103,6 +103,24 @@ if [ "$WHAT" = train ] || [ "$WHAT" = all ]; then
     fi
   else
     echo "--- skip training: dataset/CrowdHuman not found (see scripts/fetch_datasets.py)"
+  fi
+fi
+
+if [ "$WHAT" = jhu ] || [ "$WHAT" = all ]; then
+  # 6. Fine-tune the point model on JHU-Crowd++ as well (dense crowds, fog, high
+  #    views), starting from the CrowdHuman model; then score both on both datasets
+  if [ "${JHU_OK:-0}" = 1 ] && [ "$CROWDHUMAN_OK" = 1 ] && [ -f weights/p2pnet_crowd.pth ]; then
+    AMP=(); [ "$DEVICE" != cpu ] && AMP=(--amp)
+    run train_dense_jhu python train_dense.py "${CH[@]}" --data jhu:dataset/JHU-Crowd@4 \
+        --init weights/p2pnet_crowd.pth --lr 5e-5 --lr-backbone 5e-6 --epochs 60 "${AMP[@]}" \
+        --batch 8 --val-max 400 --val-every 1 --patience 5 --resume --device "$DEVICE" \
+        --out weights/p2pnet_crowd_jhu.pth
+    for w in p2pnet_crowd p2pnet_crowd_jhu; do
+      [ -f "weights/$w.pth" ] && weights "dense count $w" && run "dense_$w" python evaluate.py dense \
+          "${CH[@]}" --data jhu:dataset/JHU-Crowd --max 800 --enhance --weights "weights/$w.pth" "${DEV[@]}"
+    done
+  else
+    echo "--- skip JHU fine-tune: needs dataset/JHU-Crowd, dataset/CrowdHuman and weights/p2pnet_crowd.pth"
   fi
 fi
 echo "Done. JSON results: results/eval_*.json · logs: $LOG/"

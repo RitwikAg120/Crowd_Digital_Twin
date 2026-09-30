@@ -300,7 +300,7 @@ def dense(args) -> dict:
     samples = []
     for spec in args.data:
         kind, root = spec.split(":", 1)
-        samples += [(kind, *smp) for smp in list_samples(kind, root, "test")]
+        samples += [(kind, *smp) for smp in list_samples(kind, root.partition("@")[0], "test")]
     if not samples:
         raise SystemExit("No test images found.")
     if args.max and len(samples) > args.max:
@@ -657,7 +657,7 @@ def main():
 
     d = sub.add_parser("dense", help="crowd-count error on CrowdHuman val")
     d.add_argument("--data", action="append", required=True,
-                   help="kind:path as in train_dense.py (crowdhuman, points)")
+                   help="kind:path as in train_dense.py (crowdhuman, jhu, points)")
     d.add_argument("--weights", help="point-model checkpoint (default: Config.DENSE_MODEL if present)")
     d.add_argument("--max", type=int, default=0, help="at most N images (0 = all)")
     d.add_argument("--max-side", type=int, default=2048, help="downscale larger images")
