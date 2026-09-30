@@ -1,15 +1,24 @@
 # Crowd Digital Twin (CDT)
 
-Real-time crowd monitoring: YOLO26 person + head detection, ByteTrack
-tracking, video/IoT count fusion, a per-agent digital twin with a 20 s
-social-force forecast, zone risk scoring and a live WebSocket dashboard.
+Real-time crowd monitoring: YOLO26 person + head detection (with a dense-crowd
+mode for crowds where only heads are visible), ByteTrack tracking, video/IoT
+count fusion, a per-agent digital twin with a self-calibrating 20 s forecast,
+zone risk scoring and a live WebSocket dashboard.
 
 ## 1. Layout
 
 | File / folder              | What it is                                                              |
 |----------------------------|--------------------------------------------------------------------------|
 | `main.py`                  | The full 15-layer (A–O) CDT pipeline + FastAPI/WebSocket server          |
+| `forecast.py`              | Layer K — motion filter, what the twin learns about the scene, the 20 s forecast and its self-check |
+| `dense.py`                 | Dense-crowd head points (P2PNet); used when `weights/p2pnet_crowd.pth` exists |
+| `iot.py`                   | Gate counters (Stream 2) over HTTP (`POST /api/iot`) or MQTT              |
 | `evaluate.py`              | Layer N — benchmarks and accuracy metrics; results go to `results/`      |
+| `train_dense.py`           | Trains the dense-crowd point model (run on the GB10)                     |
+| `export.py`                | TensorRT / ONNX export for Jetson or the GB10 (run on the target)        |
+| `scripts/`                 | GB10: `gb10_setup.sh`, `fetch_datasets.py`, `run_gb10.sh` (every measurement and training run) |
+| `tools/`                   | `annotate_points.py` (label heads for training), `iot_gate_sim.py` (play a gate counter) |
+| `tests/`                   | Checks: `python tests/test_forecast.py` (twin-only env), `test_dense.py`, `test_api.py` (full env) |
 | `calibrate.py`             | Ground calibration: click ≥4 floor points, or give the camera's height/tilt |
 | `calibration/`             | Calibration files; `auto_<video>.json` are the saved automatic estimates |
 | `static/index.html`        | The live operator dashboard (connects to `/ws` on the same host)         |
@@ -69,8 +78,8 @@ A GPU machine can run the detectors, keep the experience logs (or write MOT
 CSV tracks), and the twin can then be replayed and developed on a laptop.
 
 Open **http://localhost:8000/** for the dashboard and **http://localhost:8000/twin**
-for the 3D digital twin with the 20 s forecast. The 3D twin loads Three.js from
-the jsDelivr CDN, so the browser needs internet access.
+for the 3D digital twin with the 20 s forecast. Three.js is served from
+`static/vendor/three/`, so everything runs without internet access.
 
 Other sources and options:
 ```bash
@@ -86,16 +95,31 @@ REST endpoints:
 curl http://localhost:8000/api/snapshot   # latest payload (without the image)
 curl http://localhost:8000/api/zones      # zone grid geometry and area in m²
 curl http://localhost:8000/api/fusion_log # last 20 fusion results
+curl http://localhost:8000/api/sources    # videos the dashboard can switch to
+curl -X POST -H "Content-Type: application/json" -d '{"name":"demo.mp4"}' http://localhost:8000/api/source
 curl http://localhost:8000/api/twin       # 3D twin: scene (floor, walls, zones, camera), crowd state, 20 s forecast
 ```
 
 ## 3. Models
 
-The full-body (FBOX) detector feeds ByteTrack and the digital twin; the head
-(HBOX) detector is drawn on the video and sent to the dashboard as
-`head_bounding_boxes` (set `HBOX_EVERY` in `Config` to run it less often).
-`evaluate.py ucf` also scores head and body+head counting via
-`fuse_fbox_hbox()`.
+The full-body (FBOX) detector feeds ByteTrack and the digital twin. Heads
+from the head (HBOX) detector that have no body box around them are people
+the body detector missed: each becomes a whole-person box (head on top, feet
+from the ground geometry — exact with a camera calibration, 7 head-heights
+otherwise) and is tracked with the bodies.
+
+**Dense mode.** In a dense crowd (a ghat at the Kumbh) bodies are hidden and
+heads are 3–10 px, so both detectors miss most people. When many heads have
+no body (`DENSE_MIN_HEADS`, `DENSE_HEAD_RATIO`), the pipeline switches to
+dense mode by itself: the head detector runs at `HBOX_IMGSZ_DENSE` (2560 px)
+and, if `weights/p2pnet_crowd.pth` exists, the P2PNet point model (`dense.py`)
+finds one point per head — the model built for dense crowds. On
+`kumbhvideo4.mp4` the twin went from 3–23 tracked people per frame (bodies
+only) to ~106 with dense-mode heads; the point model is needed for the rest
+(the scene holds several hundred). Train it on the GB10 (`train_dense.py`,
+§5) or use the published P2PNet checkpoint there
+(`scripts/fetch_datasets.py p2pnet`, academic use only). The dashboard shows
+**Dense mode** and how people were **found** (body / head / point).
 
 Inference runs on CUDA in FP16 when PyTorch sees a GPU, otherwise on CPU.
 Model paths, confidence thresholds, input sizes and `MAX_DET` (1000, so dense
@@ -124,6 +148,9 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
      tilt. It runs on the first ~20–300 frames, needs ~300 unobstructed
      full-body boxes, assumes a `--hfov` of 65° and people 1.7 m tall, and is
      saved to `calibration/auto_<video>.json` for reuse with `--calibration`.
+     In dense crowds, where bodies are hidden, head boxes do the same job
+     (heads are `HEAD_SIZE_M` = 0.25 m and sit on a plane 1.45 m above the
+     floor); they are used first when they outnumber bodies 3 to 1.
      A wrong field of view mostly scales the depth direction (a 50° vs 80°
      guess changes far-zone areas by up to ~2×).
   3. A flat `--scene-width-m × --scene-height-m` scale (40 × 22.5 m) when
@@ -138,10 +165,17 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
 - **Fusion (A).** `C_f = 0.70·C_video + 0.30·C_iot`,
   `κ = 1 − |C_video − C_iot| / max(C_video, C_iot, 1)`. Without real gate
   sensors, `IoTSimulator` follows the smoothed video count plus people the
-  camera misses, with a bounded (mean-reverting) miscount. Call
-  `pipeline.fusion.iot.push_real(entry, exit)` from a sensor callback to switch
-  to live counts. When the gates see more than the camera, detection
-  confidence is boosted (up to ×1.2).
+  camera misses, with a bounded (mean-reverting) miscount. Real gate counters
+  report over HTTP (`POST /api/iot {"entry": 3, "exit": 1}`, optional
+  `--iot-token`) or MQTT (`--mqtt broker:1883 --mqtt-topic cdt/gates/#`, needs
+  `paho-mqtt`); the first report switches the fusion to live gates.
+  `tools/iot_gate_sim.py` plays a gate counter over either path. When the
+  gates see more than the camera, detection confidence is boosted (up to ×1.2).
+- **Motion state.** Each person's feet go through a Kalman filter on the
+  ground (`forecast.MotionFilter`) whose measurement noise comes from the
+  perspective: a far-away pixel spans metres of floor, so a far person's box
+  jitter does not read as walking. Speeds are the filtered velocity; each
+  person also carries its uncertainty and a walking/standing flag.
 - **Lost tracks.** Agents that ByteTrack loses stay in the twin (not counted)
   for `TRACKER_BUFFER` = 30 frames and are purged after that.
 - **Simulation trigger (J).** `SimulationTrigger` flags the forecast (with its
@@ -149,9 +183,19 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
   κ < 0.70; the dashboard shows the flag and links to the 3D twin.
 - **3D digital twin with the 20 s forecast (K), at `/twin`.** Separate from the
   dashboard: `TwinService` reads the pipeline's crowd state in metres and, while
-  a viewer is open, runs a social force model (Helbing & Molnár, 1995) every
-  second — 25 steps × 0.8 s = 20 s ahead, bouncing off the edges of the
-  walkable floor. The viewer (`static/twin.html`, Three.js) builds its
+  a viewer is open, forecasts 25 steps × 0.8 s = 20 s ahead every second with
+  `forecast.CrowdForecaster`, an anticipatory social force model:
+  walkers keep their heading and speed but turn towards the lanes the twin
+  has learned (a flow field of where people walk); standing people stay put;
+  people avoid only those they are about to meet (time-to-collision law,
+  Karamouzas et al. 2014), so a dense standing crowd does not blow apart;
+  walking slows with local density (Weidmann's fundamental diagram); people
+  leave through the edges of the camera's view and slide along walls; and
+  newcomers arrive where and as often as people have been seen entering.
+  The twin also checks its own forecasts: `ForecastSkill` scores each zone
+  count forecast against what then happened and learns, per horizon, how far
+  to trust the predicted change over "no change" — the 3D twin shows that
+  running skill. The viewer (`static/twin.html`, Three.js) builds its
   environment from the calibration: the walkable floor with a 2 m grid, the
   zones, **walls** where the floor ends (learned from people's feet), low
   markers at the **edges of the camera's view**, and the camera itself at its
@@ -165,7 +209,10 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
   `SEND_FRAME = False` to send the heatmap without any video pixels.
 - **Telemetry.** `fps` is processed frames per second; `latency_ms` is
   end-to-end, from frame capture to finished payload; `timing_ms.detect` is
-  the detector share.
+  the detector share. `GET /api/health` reports whether video is arriving,
+  uptime, FPS and stream reconnects, for long unattended runs.
+- **Live streams.** An RTSP camera that stops delivering frames for ~2 s is
+  reopened automatically, backing off up to 30 s between tries.
 - **Experience logs.** The live pipeline logs every processed frame to
   `experience/` for retraining (~0.35 GB/hour at CPU speed, ~1.6 GB/hour at
   12.5 FPS on a dense crowd). The folder is capped at `EXPERIENCE_MAX_GB`
@@ -182,23 +229,42 @@ calibration; the dashboard shows which one is active.
 
 ```bash
 python evaluate.py bench --source videos/demo.mp4 --frames 200   # end-to-end FPS / latency
+python evaluate.py tracks --source videos/demo.mp4 --out dataset/tracks/demo   # one pass → MOT tracks
+python evaluate.py forecast --tracks dataset/tracks/demo          # 20 s forecast vs what happened
 python evaluate.py mot17 --seq <MOT17>/train/MOT17-09-FRCNN      # count MAE/RMSE/r + MOTA
 python evaluate.py ucf --root <UCF_CC_50 folder>                 # count error, body/head/both
-python evaluate.py ade --root dataset/eth_ucy                    # ADE/FDE: linear vs social force
+python evaluate.py dense --data shtech:<ShanghaiTech/part_A>     # dense-crowd count error
+python evaluate.py ade --root dataset/eth_ucy                    # ADE/FDE, ETH/UCY protocol
 ```
 
 Each run prints its metrics and saves them as JSON in `results/`. `bench`
 measures the whole pipeline (decode → detection → tracking → twin → overlay →
 JSON), not just the detector; `mot17` processes every frame and scores
-tracking with CLEAR-MOT (MOTA, MOTP, ID switches). The datasets are not in the
-repo — download MOT17, UCF-CC-50 and ETH/UCY first.
+tracking with CLEAR-MOT (MOTA, MOTP, ID switches). `forecast` replays tracks in
+time order like the live twin and, every second, forecasts with each model —
+persistence (nobody moves), constant velocity, the old twin (1 s slope
+velocity + Helbing social force bouncing off the view's edges) and the new
+twin, with ablations — then scores people's positions (ADE/FDE) and zone
+counts at 2.4–20 s against what actually happened.
+
+**Datasets and training run on the GB10**, not the laptop:
+```bash
+bash scripts/gb10_setup.sh                 # venv + ARM64 CUDA PyTorch + requirements
+python scripts/fetch_datasets.py all       # ETH/UCY, UCF-CC-50, MOT17 02/04/09 (only those, via
+                                           # HTTP range requests), UCF-QNRF, P2PNet weights
+python scripts/fetch_datasets.py manual    # where to get ShanghaiTech, JHU-Crowd++, NWPU
+bash scripts/run_gb10.sh                   # every benchmark, evaluation and the dense-model training
+```
+To adapt the dense model to your own footage, label 30–50 frames with
+`tools/annotate_points.py` (it pre-fills heads from the detector) into
+`dataset/kumbh_points/{train,test}`; `run_gb10.sh` includes them.
 
 ## 6. Layer map (report layers A–O)
 
 | Layer | Report name | Where in `main.py` |
 |-------|-------------|---------------------|
 | A | Data Fusion Layer | `DataFusionLayer`, `IoTSimulator` (called from `TwinPipeline.process_tracks`) |
-| B | Edge AI Detection | `CDTPipeline.detect` (FBOX + HBOX); `ReplayPipeline` replays recorded tracks instead |
+| B | Edge AI Detection | `CDTPipeline.detect` (FBOX + HBOX), dense mode + `dense.PointCounter`; `ReplayPipeline` replays recorded tracks instead |
 | C | ByteTrack Multi-Object Tracking | `sv.ByteTrack` (in `CDTPipeline.configure`) |
 | D | Confidence Estimator | `ConfidenceEstimator` |
 | E | Zone Manager | `ZoneManager`, with ground areas from `GroundPlane` (+ `PedestrianCalibrator`) |
@@ -207,7 +273,7 @@ repo — download MOT17, UCF-CC-50 and ETH/UCY first.
 | H | Density & Flow Estimator | `DensityFlowEstimator` |
 | I | Trend Predictor | `TrendPredictor` |
 | J | Simulation Trigger | `SimulationTrigger` |
-| K | Short-Horizon Simulation | `TwinService.forecast` + `SocialForceModel`, shown in the 3D twin (`/twin`) |
+| K | Short-Horizon Simulation | `TwinService.forecast` + `forecast.py` (`CrowdForecaster`, `SceneMemory`, `ForecastSkill`), shown in the 3D twin (`/twin`); `SocialForceModel` is kept as the evaluation baseline |
 | L | Risk Estimator | `RiskEstimator` |
 | M | Alert Engine | `AlertEngine` |
 | N | Quantitative Evaluation | `evaluate.py` |
@@ -224,6 +290,10 @@ repo — download MOT17, UCF-CC-50 and ETH/UCY first.
   install the CUDA build from https://pytorch.org/get-started/locally/.
 - **Still too slow** — two detectors at 960/1280 px are heavy. Lower
   `YOLO_IMGSZ` / `HBOX_IMGSZ`, raise `HBOX_EVERY`, or switch to the `n` weights.
+  Dense mode's 2560 px head pass takes ~1 s per frame on a laptop CPU; on a
+  GPU it is fast — or lower `HBOX_IMGSZ_DENSE`, or set `DENSE_AUTO = False`.
+  On Jetson / GB10, `python export.py` builds TensorRT engines; run with
+  `--body weights/yolo26strained.engine --head weights/yoloheadv26s.engine`.
 - **`ByteTrack` import error** — supervision 0.31 removed it; keep
   `supervision<0.31` (pinned in `requirements.txt`).
 - **Ground stays "flat"** — the automatic estimate needs unobstructed

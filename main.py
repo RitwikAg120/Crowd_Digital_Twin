@@ -10,7 +10,7 @@ Members:
   Ritwik Agrawal    (CS908)
 
 Architecture:
-  CCTV/IoT/Mobility → VideoInputHandler → DataFusionLayer
+  CCTV/IoT → VideoInputHandler → DataFusionLayer
   → Edge AI (YOLO26s body + head detectors) → ByteTrack → ConfidenceEstimator
   → CrowdStateRepresentation + Heatmaps → ZoneManager
   → DensityFlowEstimator → DigitalTwinEngine (Agent-Based)
@@ -30,17 +30,19 @@ import asyncio
 import base64
 import json
 import math
+import os
+import re
 import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,6 +52,13 @@ from scipy.spatial import cKDTree
 from scipy.stats import linregress
 # Experience buffer for adaptive learning (logs + sampled frames)
 from experience.experience_buffer import ExperienceBuffer
+# Gate counters (Stream 2) over HTTP / MQTT
+from iot import MQTTGates, parse_counts
+# Camera-motion compensation (handheld / panning footage)
+from stabilize import CameraMotion, apply as apply_transform
+# Motion state and the 20 s forecast (Layer K)
+from forecast import (CrowdForecaster, Floor, ForecastParams, ForecastSkill, MotionFilter,
+                      SceneMemory, walking_weight)
 
 
 # ─── Global Config ────────────────────────────────────────────────────────────
@@ -70,17 +79,37 @@ class Config:
     HBOX_IMGSZ        = 1280
     HBOX_EVERY        = 1          # run the head detector every Nth processed frame
 
+    # Dense crowds: people seen only as heads. Heads (or head points) with no
+    # body box become people; when many are, dense mode looks harder.
+    HEADS_AS_PEOPLE   = True
+    HEAD_SIZE_M       = 0.25       # head box height: the ruler when calibrating from heads
+    BODY_PER_HEAD     = 7.0        # body height in head heights, without a camera model
+    DENSE_AUTO        = True       # switch dense mode on/off by itself
+    DENSE_MIN_HEADS   = 15         # on when ≥ this many heads have no body …
+    DENSE_HEAD_RATIO  = 0.5        # … and they are ≥ this share of the bodies
+    HBOX_IMGSZ_DENSE  = 2560       # head detector input in dense mode (3–10 px heads)
+    HBOX_CONF_DENSE   = 0.15
+    DENSE_MODEL       = "weights/p2pnet_crowd.pth"   # head-point model (dense.py), used if present
+    DENSE_THRESHOLD   = 0.5        # head score for a point
+    DENSE_EVERY       = 1          # run the point model every Nth processed frame in dense mode
+    DENSE_PROBE_EVERY = 50         # with the point model: look for a dense crowd every Nth frame
+                                   # even when the head detector sees none (drone / overhead views)
+    CALIB_MIN_HEADS   = 600        # head boxes to calibrate from, when bodies are too few
+
     # Pipeline
     FRAME_SKIP        = 2          # process every Nth source frame; 1 = every frame
     FRAME_WIDTH       = 1280       # max working resolution; larger sources are downscaled
     FRAME_HEIGHT      = 720
     SOURCE_FPS        = 25.0       # used when the source does not report its frame rate
+    STREAM_RETRY_READS = 200       # failed reads (~2 s) before a live stream is reopened
+    STABILIZE         = True       # compensate camera motion (turns itself on only when the view moves)
 
     # Ground-plane calibration (perspective). Pixels map to metres on the ground
     # through a homography taken from, in order: CALIBRATION_FILE, an estimate
     # from people's box heights (AUTO_CALIBRATE), or the flat SCENE_* scale.
     CALIBRATION_FILE  = None       # JSON: ≥4 image↔ground points, or camera height/pitch/FOV
     AUTO_CALIBRATE    = True
+    REUSE_AUTO_CALIBRATION = True  # start from calibration/auto_<video>.json when it exists
     CAMERA_HFOV_DEG   = 65.0       # horizontal field of view assumed by the estimate
     PERSON_HEIGHT_M   = 1.7        # average full-body height, the estimate's ruler
     CALIB_MIN_BOXES   = 300        # full-body boxes needed before estimating
@@ -98,7 +127,10 @@ class Config:
     # Risk thresholds
     DENSITY_HIGH      = 0.40       # persons/m²; density risk saturates at 2× = 0.8 p/m² (Fruin LOS F)
     SPEED_HIGH        = 1.5        # m/s; speed risk saturates at 2× = 3 m/s (running)
-    VEL_WINDOW_S      = 1.0        # seconds of track used for each velocity estimate
+    # Feet position noise of the detector, for the motion filter (forecast.MotionFilter)
+    FEET_JITTER_PX    = 1.5        # px, at least (small boxes jitter by ~1–2 px whatever their size)
+    FEET_JITTER_X     = 0.015      # × box height, across
+    FEET_JITTER_Y     = 0.03       # × box height, along (the box bottom is fuzzier)
     RISK_WINDOW       = 15         # frames for trend window
 
     # Simulation (Layers J + K)
@@ -110,7 +142,12 @@ class Config:
 
     # 3D digital twin (/twin) — runs the 20 s forecast, separate from the dashboard
     TWIN_HZ           = 5          # crowd-state updates to the 3D twin per second
-    FORECAST_HZ       = 1          # forecasts per second, only while the twin is open
+    FORECAST_HZ       = 1          # forecasts per second, while the twin is open or flagged
+    FORECAST_ALERTS   = True       # when the trigger flags the scene, forecast even with no
+                                   # viewer and alert on zones predicted to reach capacity
+    FORECAST_ALERT_MAX_S = 20.0    # … within this many seconds
+    OBSTACLE_EVERY_S  = 30.0       # how often the twin re-learns obstacles (never-walked floor)
+    WHATIF_STEPS      = 50         # panic what-if: 50 × SIM_STEP_S = 40 s
 
     # Social force model (Helbing & Molnár, 1995) — metres and seconds
     SF_TAU            = 0.5        # relaxation time towards the desired velocity
@@ -134,6 +171,7 @@ class Config:
     IOT_OCCLUSION     = 1.15       # gates also count people the camera cannot see
     IOT_SMOOTHING     = 0.1        # occupancy follows the video count at this EMA rate
     IOT_THROUGH_RATE  = 0.02       # share of the occupancy passing through the gates per tick
+    IOT_TOKEN         = None       # set to require header X-IoT-Token on POST /api/iot
 
     # Density
     HEATMAP_SIGMA_M   = 1.0        # Gaussian per person, in metres on the ground
@@ -143,8 +181,10 @@ class Config:
     WS_HZ             = 10         # max broadcasts per second
     EXPERIENCE_MAX_GB = 2.0        # oldest experience logs/frames are deleted beyond this
 
-    # ETH/UCY path (optional — for mobility priors)
-    ETH_UCY_PATH      = "dataset/eth_ucy"
+    # Videos the dashboard's source switcher offers
+    VIDEO_DIR         = "videos"
+    VIDEO_EXTS        = (".mp4", ".avi", ".mov", ".mkv", ".webm")
+    ALLOW_STREAM_URLS = True       # the switcher may also open cameras (index) and rtsp/http URLs
 
 
 def resolve_device(pref: str) -> str:
@@ -162,26 +202,6 @@ def fit_within(h: int, w: int, max_h: int, max_w: int) -> Tuple[int, int]:
     """Largest (h, w) with the same aspect ratio that fits in max_h × max_w."""
     s = min(1.0, max_w / w, max_h / h)
     return max(1, int(round(h * s))), max(1, int(round(w * s)))
-
-
-def load_eth_ucy(path) -> Optional[np.ndarray]:
-    """
-    Read one ETH/UCY trajectory file as an (N, 4) array of frame, pid, x, y
-    (metres). Handles the 4-column format (tab or space separated) and the
-    8-column ETH obsmat format (frame, pid, x, z, y, vx, vz, vy). Returns
-    None for files that are not numeric trajectory data.
-    """
-    try:
-        data = np.loadtxt(str(path), ndmin=2)
-    except ValueError:
-        return None
-    if data.size == 0:
-        return None
-    if data.shape[1] == 4:
-        return data
-    if data.shape[1] == 8:
-        return data[:, [0, 1, 2, 4]]
-    return None
 
 
 # ─── Ground Plane (perspective) ───────────────────────────────────────────────
@@ -401,14 +421,83 @@ class GroundPlane:
                           "b": np.round(world[k], 2).tolist(), "kind": kind})
         return edges
 
-    def camera(self) -> Optional[dict]:
-        """Camera pose for the 3D twin: at the ground origin, looking along +Y."""
+    def feet_from_heads(self, boxes) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Where people stand, from head boxes (x1, y1, x2, y2) → feet pixels
+        (N, 2) and body heights in px (N,). With a camera model this is exact
+        geometry: the chin lies on a plane PERSON_HEIGHT_M − HEAD_SIZE_M above
+        the floor, straight above the feet, so the chin's point on that plane
+        is the feet's point on the floor. Otherwise a person is BODY_PER_HEAD
+        heads tall.
+        """
+        b  = np.asarray(boxes, float).reshape(-1, 4)
+        cx = (b[:, 0] + b[:, 2]) / 2
+        hh = np.maximum(b[:, 3] - b[:, 1], 1.0)
+        feet = np.column_stack([cx, b[:, 3] + (Config.BODY_PER_HEAD - 1) * hh])
         p = self.params
-        if "camera_height_m" not in p:
+        lift = Config.PERSON_HEIGHT_M - Config.HEAD_SIZE_M
+        if len(b) and "camera_height_m" in p and p["camera_height_m"] > lift + 0.3:
+            chin = GroundPlane.from_camera(self.h, self.w, p["camera_height_m"] - lift,
+                                           p["pitch_deg"], p["hfov_deg"])
+            f = self.to_image(chin.to_world(np.column_stack([cx, b[:, 3]])))
+            ok = np.isfinite(f).all(axis=1) & (f[:, 1] > b[:, 3])
+            feet[ok] = f[ok]
+        return feet, feet[:, 1] - b[:, 1]
+
+    def camera(self) -> Optional[dict]:
+        """
+        Camera pose for the 3D twin: height, tilt and field of view, and where
+        on the ground it stands (x, y) and which way it looks (yaw from +Y
+        towards +X). Camera models stand at the origin looking along +Y; for
+        point calibrations the pose is recovered from the homography.
+        """
+        p = self.params
+        if "camera_height_m" in p:
+            return {"height_m": round(float(p["camera_height_m"]), 2),
+                    "pitch_deg": round(float(p["pitch_deg"]), 2),
+                    "hfov_deg": round(float(p["hfov_deg"]), 2),
+                    "x": 0.0, "y": 0.0, "yaw_deg": 0.0}
+        return self.pose_from_homography()
+
+    def pose_from_homography(self) -> Optional[dict]:
+        """
+        Decompose ground → image = K [r1 r2 t] for a pinhole camera with square
+        pixels and the principal point at the image centre: the focal length
+        makes r1, r2 orthonormal (least squares over both conditions), then
+        the camera's centre is −Rᵀt. None when the view has no perspective
+        (flat calibrations) or the homography isn't a real camera's.
+        """
+        G = self.H_inv / np.linalg.norm(self.H_inv)                   # ground → image
+        T = np.array([[1, 0, -self.w / 2], [0, 1, -self.h / 2], [0, 0, 1.0]])
+        M = T @ G
+        m1, m2, m3 = M[:, 0], M[:, 1], M[:, 2]
+        a = np.array([m1[0] * m2[0] + m1[1] * m2[1], (m1[:2] @ m1[:2]) - (m2[:2] @ m2[:2])])
+        b = np.array([m1[2] * m2[2], m1[2] ** 2 - m2[2] ** 2])
+        if (a @ a) < 1e-18:
             return None
-        return {"height_m": round(float(p["camera_height_m"]), 2),
-                "pitch_deg": round(float(p["pitch_deg"]), 2),
-                "hfov_deg": round(float(p["hfov_deg"]), 2)}
+        q = -(a @ b) / (a @ a)                                          # 1 / f²
+        if not q > 0:
+            return None
+        f = 1.0 / math.sqrt(q)
+        s = np.array([1 / f, 1 / f, 1.0])
+        r1, r2, t = m1 * s, m2 * s, m3 * s
+        lam = 2.0 / (np.linalg.norm(r1) + np.linalg.norm(r2))
+        if t[2] * lam < 0:                                              # ground in front of the camera
+            lam = -lam
+        r1, r2, t = r1 * lam, r2 * lam, t * lam
+        U, _, Vt = np.linalg.svd(np.column_stack([r1, r2, np.cross(r1, r2)]))
+        R = U @ Vt                                                      # nearest rotation
+        C = -R.T @ t                                                    # camera centre, ground frame
+        up = 1.0 if C[2] >= 0 else -1.0                                 # handedness of the user's axes
+        d = R[2, :]                                                     # optical axis, ground frame
+        pitch = math.degrees(math.asin(np.clip(-d[2] * up, -1, 1)))
+        height = abs(float(C[2]))
+        if height < 0.2 or not 0 < pitch < 90:
+            return None
+        return {"height_m": round(height, 2), "pitch_deg": round(pitch, 2),
+                "hfov_deg": round(math.degrees(2 * math.atan(self.w / 2 / f)), 2),
+                "x": round(float(C[0]), 2), "y": round(float(C[1]), 2),
+                "yaw_deg": round(math.degrees(math.atan2(d[0], d[1])), 2)}
 
 
 class PedestrianCalibrator:
@@ -419,19 +508,29 @@ class PedestrianCalibrator:
     and the slope give the camera's tilt and height, for an assumed field of
     view (CAMERA_HFOV_DEG) and person height (PERSON_HEIGHT_M). The FBOX
     model predicts whole-body boxes even for partly hidden people, so boxes
-    inside a crowd still measure whole people.
+    inside a crowd still measure whole people. In a dense crowd, where
+    bodies are hidden, heads do the same job: they sit on a plane
+    PERSON_HEIGHT_M − HEAD_SIZE_M above the floor and measure HEAD_SIZE_M.
     """
     def __init__(self, h: int, w: int):
         self.h, self.w = h, w
         self.frames    = 0
         self._feet: List[float]    = []
         self._heights: List[float] = []
+        self._chins: List[float]   = []          # head boxes: bottom row …
+        self._heads: List[float]   = []          # … and height, px
 
-    def add(self, dets: List[dict]):
+    def add(self, dets: List[dict], heads: Sequence[dict] = ()):
         self.frames += 1
+        for hd in heads:
+            x1, y1, x2, y2 = hd["box"]
+            if hd.get("confidence", 1.0) >= 0.3 and y1 > 2 and y2 < self.h - 2 and \
+                    0.6 <= (y2 - y1) / max(x2 - x1, 1e-6) <= 2.0:
+                self._chins.append(float(y2))
+                self._heads.append(float(y2 - y1))
         for d in dets:
             fy, bh = d.get("fy"), d.get("bh")
-            if not bh or d.get("confidence", 1.0) < 0.4:
+            if not bh or d.get("confidence", 1.0) < 0.4 or d.get("src", "body") != "body":
                 continue
             if fy - bh <= 2 or fy >= self.h - 2:             # cut off at the top or bottom
                 continue
@@ -445,15 +544,41 @@ class PedestrianCalibrator:
     @property
     def ready(self) -> bool:
         return ((self.frames >= Config.CALIB_MIN_FRAMES and
-                 len(self._feet) >= Config.CALIB_MIN_BOXES) or
+                 (len(self._feet) >= Config.CALIB_MIN_BOXES or
+                  len(self._heads) >= Config.CALIB_MIN_HEADS)) or
                 self.frames >= Config.CALIB_MAX_FRAMES)
 
     def fit(self) -> Tuple[Optional[GroundPlane], str]:
         """The estimated ground plane (None if it can't be estimated) and why."""
-        y, hp = np.array(self._feet), np.array(self._heights)
-        if len(y) < 30:
-            return None, f"only {len(y)} usable full-body boxes"
-        # Robust line  height = a · foot_row + b  (RANSAC, then least squares)
+        fits = []
+        if len(self._feet) >= 30:
+            fits.append(lambda: self._fit(np.array(self._feet), np.array(self._heights),
+                                          Config.PERSON_HEIGHT_M, 0.0, "people"))
+        if len(self._heads) >= 60:                        # dense crowd: heads measure too
+            heads = lambda: self._fit(np.array(self._chins), np.array(self._heads),
+                                      Config.HEAD_SIZE_M,
+                                      Config.PERSON_HEIGHT_M - Config.HEAD_SIZE_M, "heads")
+            # Where heads far outnumber visible bodies, they span the scene better
+            fits.insert(0 if len(self._heads) >= 3 * len(self._feet) else len(fits), heads)
+        if not fits:
+            return None, f"only {len(self._feet)} usable full-body boxes"
+        why_all = []
+        for fit in fits:
+            ground, why = fit()
+            if ground is not None:
+                return ground, why
+            why_all.append(why)
+        return None, "; ".join(why_all)
+
+    def _fit(self, y: np.ndarray, hp: np.ndarray, size_m: float, lift_m: float,
+             what: str) -> Tuple[Optional[GroundPlane], str]:
+        """
+        Fit the camera from objects of real height size_m whose bottom rows
+        are y and pixel heights hp, standing on a plane lift_m above the floor
+        (0 for whole people; the chin plane for heads).
+        """
+        n_all = len(y)
+        # Robust line  height = a · bottom_row + b  (RANSAC, then least squares)
         rng, best = np.random.default_rng(0), None
         for _ in range(300):
             i, j = rng.choice(len(y), 2, replace=False)
@@ -463,33 +588,33 @@ class PedestrianCalibrator:
             inl = np.abs(hp - (hp[i] + a * (y - y[i]))) < np.maximum(0.15 * hp, 3.0)
             if best is None or inl.sum() > best.sum():
                 best = inl
-        if best is None or best.sum() < max(30, 0.3 * len(y)):
+        if best is None or best.sum() < max(30, 0.3 * n_all):
             return None, "box heights don't follow a single ground plane"
         y, hp = y[best], hp[best]
         a, b = np.polyfit(y, hp, 1)
-        person_h = Config.PERSON_HEIGHT_M
         if a <= 0 or a * y.max() + b < 1.15 * (a * y.min() + b):
-            # Hardly any perspective (distant or overhead view): one scale from person height
-            s = person_h / float(np.median(hp))
+            # Hardly any perspective (distant or overhead view): one scale from their size
+            s = size_m / float(np.median(hp))
             ground = GroundPlane.flat(self.h, self.w, s * self.w, s * self.h, source="pedestrians")
-            return ground, f"little perspective; {s * 100:.1f} cm per pixel from {len(y)} people"
+            return ground, f"little perspective; {s * 100:.1f} cm per pixel from {len(y)} {what}"
         horizon = -b / a
         if horizon > y.min() - 5:
-            return None, "the estimated horizon falls below some people's feet"
+            return None, f"the estimated horizon falls below some {what}"
         # Exact pinhole model with the assumed field of view: fit tilt and height
         f  = (self.w / 2) / math.tan(math.radians(Config.CAMERA_HFOV_DEG) / 2)
         v0 = self.h / 2
-        lo, hi = [-0.3, 0.5], [1.5, 500.0]
-        x0 = np.clip([math.atan2(v0 - horizon, f), person_h / a], lo, hi)
+        lo, hi = [-0.3, 0.3], [1.5, 500.0]
+        x0 = np.clip([math.atan2(v0 - horizon, f), size_m / a], lo, hi)
         fit = least_squares(
-            lambda p: person_height_px(y, f, v0, p[0], p[1], person_h) / hp - 1,
+            lambda p: person_height_px(y, f, v0, p[0], p[1], size_m) / hp - 1,
             x0=x0, bounds=(lo, hi), loss="soft_l1", f_scale=0.1,
         )
         pitch, cam_h = fit.x
-        ground = GroundPlane.from_camera(self.h, self.w, float(cam_h), math.degrees(pitch),
+        cam_h = float(cam_h) + lift_m                       # above the floor
+        ground = GroundPlane.from_camera(self.h, self.w, cam_h, math.degrees(pitch),
                                          Config.CAMERA_HFOV_DEG, source="pedestrians")
         return ground, (f"camera ≈ {cam_h:.1f} m high, tilted {math.degrees(pitch):.0f}° down "
-                        f"(from {len(y)} people, {Config.CAMERA_HFOV_DEG:.0f}° field of view assumed)")
+                        f"(from {len(y)} {what}, {Config.CAMERA_HFOV_DEG:.0f}° field of view assumed)")
 
 
 # ─── Data Classes ─────────────────────────────────────────────────────────────
@@ -504,9 +629,10 @@ class Agent:
     vx:         float = 0.0      # ground velocity, m/s
     vy:         float = 0.0
     speed:      float = 0.0      # m/s
+    vel_std:    float = 0.0      # uncertainty of the velocity, m/s
+    walking:    float = 0.0      # 0 = standing, 1 = walking (speed clearly above its noise)
     confidence: float = 1.0
     zone:       str   = ""
-    track:      list  = field(default_factory=list)   # (t, wx, wy) over the last VEL_WINDOW_S
     last_seen:  float = 0.0      # twin clock (s) at the last detection
     missed:     int   = 0        # consecutive processed frames without a detection
 
@@ -615,7 +741,7 @@ class ConfidenceEstimator:
         return round(float(det_conf) * age_w * zone_w * dens_w, 3)
 
     def set_zone_calibration(self, zone: str, weight: float):
-        """Set from ETH/UCY mobility prior or manual calibration."""
+        """Per-zone confidence weight (manual calibration; 1.0 = neutral)."""
         self._zone_cal[zone] = max(0.5, min(1.0, weight))
 
     def drop(self, agent_id: int):
@@ -711,7 +837,6 @@ class DataFusionLayer:
     Multi-modal sensor fusion:
       Stream 1: Video detections (YOLO26s + ByteTrack)    weight=0.70
       Stream 2: IoT gate counters (entry/exit cumulative) weight=0.30
-      Stream 3: ETH/UCY mobility priors (zone confidence modifier)
 
     Key insight: video undercounts in crowds (occlusion).
     IoT overcounts slightly (re-entry, sensor noise).
@@ -720,41 +845,7 @@ class DataFusionLayer:
 
     def __init__(self):
         self.iot             = IoTSimulator()
-        self.mobility: Dict[str, float] = {}   # zone_name -> confidence_weight
-        self.mobility_source = "uniform"
         self._log            = deque(maxlen=300)
-
-    def load_mobility_prior(self, eth_ucy_root: str, zone_names) -> None:
-        """
-        Derive per-zone confidence priors from ETH/UCY trajectories. With no
-        trajectory files (the placeholder note in dataset/eth_ucy is skipped)
-        every zone gets a uniform weight of 1.0.
-        """
-        speeds: List[float] = []
-        root  = Path(eth_ucy_root)
-        files = sorted(root.glob("**/*.txt")) if root.exists() else []
-        for f in files:
-            traj = load_eth_ucy(f)
-            if traj is None:
-                continue
-            for pid in np.unique(traj[:, 1]):
-                p = traj[traj[:, 1] == pid]
-                p = p[np.argsort(p[:, 0])]
-                if len(p) > 1:
-                    speeds.extend(np.linalg.norm(np.diff(p[:, 2:4], axis=0), axis=1).tolist())
-
-        if speeds:
-            global_mean = float(np.mean(speeds))
-            # High global flow → slightly lower zone confidence
-            # (extend with per-zone matching if you have zone-labelled data)
-            weight = max(0.75, 1.0 - global_mean / 100.0)
-            self.mobility_source = "eth_ucy"
-            print(f"[Fusion] ETH/UCY priors loaded. Global mean speed: {global_mean:.3f}")
-        else:
-            weight = 1.0
-            self.mobility_source = "uniform"
-            print(f"[Fusion] No ETH/UCY trajectories in {eth_ucy_root}. Using uniform priors.")
-        self.mobility = {name: weight for name in zone_names}
 
     def fuse(self, video_detections: list, frame_idx: int) -> dict:
         """
@@ -785,13 +876,11 @@ class DataFusionLayer:
         else:
             conf_scale = 1.0
 
-        # Rescale detection confidences (Stream 1 + Stream 3)
+        # Rescale detection confidences by what the gates say
         fused_dets = []
         for det in video_detections:
-            zone_w  = self.mobility.get(det.get("zone", ""), 1.0)
             new_det = dict(det)
-            new_det["confidence"] = round(
-                min(1.0, det["confidence"] * conf_scale * zone_w), 3)
+            new_det["confidence"] = round(min(1.0, det["confidence"] * conf_scale), 3)
             fused_dets.append(new_det)
 
         # Weighted count fusion
@@ -821,8 +910,9 @@ class DataFusionLayer:
 
 class SocialForceModel:
     """
-    Social force pedestrian model (Helbing & Molnár, 1995), used by the
-    short-horizon simulation (Layer K).
+    Social force pedestrian model (Helbing & Molnár, 1995) — the twin's
+    first forecast model, now kept as a baseline in evaluate.py (the 3D twin
+    uses forecast.CrowdForecaster).
 
     Each pedestrian relaxes towards a desired velocity — the heading and
     speed it was tracked at — and is repelled by the others through the
@@ -941,9 +1031,35 @@ class SocialForceModel:
 
 # ─── Digital Twin Engine ──────────────────────────────────────────────────────
 
-class DigitalTwinEngine:
-    ALPHA = 0.4   # EMA velocity smoothing
+def measurement_noise(ground: "GroundPlane", feet_px, box_h=None,
+                      scale=None) -> np.ndarray:
+    """
+    Covariance (N, 2, 2) in m² of people's feet on the ground. The detector
+    places the feet to within a few % of the box height (more vertically,
+    where the box bottom is fuzzy); the ground plane's local Jacobian turns
+    that into metres, so a far-away person, whose pixel spans metres of
+    ground, gets a large, depth-stretched uncertainty. `scale` inflates it
+    per person (e.g. feet guessed from a head).
+    """
+    p = np.asarray(feet_px, float).reshape(-1, 2)
+    n = len(p)
+    bh = np.full(n, np.nan) if box_h is None else np.asarray(box_h, float).reshape(n)
+    bh = np.where(np.isfinite(bh), bh, 60.0)
+    su = np.maximum(Config.FEET_JITTER_PX, Config.FEET_JITTER_X * bh)
+    sv = np.maximum(Config.FEET_JITTER_PX, Config.FEET_JITTER_Y * bh)
+    if scale is not None:
+        s = np.asarray(scale, float).reshape(n)
+        su, sv = su * s, sv * s
+    w0 = ground.to_world(p)
+    Jx = ground.to_world(p + [1.0, 0.0]) - w0            # metres per px along u
+    Jy = ground.to_world(p + [0.0, 1.0]) - w0            # … and along v
+    J  = np.stack([Jx, Jy], axis=2)                      # (N, 2, 2): columns = ∂world/∂(u, v)
+    D  = np.zeros((n, 2, 2))
+    D[:, 0, 0], D[:, 1, 1] = su ** 2, sv ** 2
+    return J @ D @ J.transpose(0, 2, 1) + 1e-6 * np.eye(2)
 
+
+class DigitalTwinEngine:
     def __init__(self, zone_mgr: ZoneManager, conf_est: ConfidenceEstimator,
                  frame_s: float = Config.FRAME_SKIP / Config.SOURCE_FPS):
         self.agents:    Dict[int, Agent] = {}
@@ -952,6 +1068,7 @@ class DigitalTwinEngine:
         self.frame_s    = frame_s      # seconds per processed frame
         self.frame_idx  = 0
         self.clock      = 0.0          # seconds
+        self.motion     = MotionFilter()
 
     @property
     def ground(self) -> GroundPlane:
@@ -961,18 +1078,24 @@ class DigitalTwinEngine:
                frame_gap: float = 1.0):
         """
         Fold one frame of detections into the twin. Each person's feet
-        (fx, fy) are mapped to metres on the ground; velocity (m/s) is the
-        slope of their last VEL_WINDOW_S of positions, EMA-smoothed, which
-        keeps pixel jitter from turning into fake speed far from the camera.
-        frame_gap is the time since the previous processed frame, in
-        processed frames.
+        (fx, fy) are mapped to metres on the ground and fed to a Kalman
+        filter (MotionFilter) whose measurement noise comes from the
+        perspective: position and velocity (m/s) come out smoothed, with the
+        velocity's uncertainty, so pixel jitter far from the camera does not
+        turn into fake speed. frame_gap is the time since the previous
+        processed frame, in processed frames.
         """
         self.frame_idx += 1
         self.clock     += max(frame_gap, 1e-6) * self.frame_s
         seen  = set()
-        world = self.ground.to_world([[d["fx"], d["fy"]] for d in detections])
-
-        for det, (wx, wy) in zip(detections, world):
+        feet  = [[d["fx"], d["fy"]] for d in detections]
+        world = self.ground.to_world(feet)
+        if detections:
+            R = measurement_noise(self.ground, feet, [d.get("bh", np.nan) for d in detections],
+                                  [d.get("noise_scale", 1.0) for d in detections])
+            pos, vel, vstd = self.motion.step(self.clock, [d["id"] for d in detections], world, R)
+            walk = walking_weight(np.linalg.norm(vel, axis=1), vstd)
+        for i, det in enumerate(detections):
             aid   = det["id"]
             xn, yn = det["fx"], det["fy"]
             seen.add(aid)
@@ -983,34 +1106,28 @@ class DigitalTwinEngine:
             a = self.agents.get(aid)
             if a is None:
                 a = self.agents[aid] = Agent(id=aid, x=xn, y=yn)
-            a.x, a.y, a.wx, a.wy = xn, yn, float(wx), float(wy)
+            a.x, a.y = xn, yn
+            a.wx, a.wy = float(pos[i, 0]), float(pos[i, 1])
+            a.vx, a.vy = float(vel[i, 0]), float(vel[i, 1])
+            a.speed    = math.hypot(a.vx, a.vy)
+            a.vel_std  = float(vstd[i])
+            a.walking  = float(walk[i])
             a.zone       = zone
             a.confidence = conf
             a.last_seen  = self.clock
             a.missed     = 0
-            a.track.append((self.clock, a.wx, a.wy))
-            while a.track[0][0] < self.clock - Config.VEL_WINDOW_S:
-                a.track.pop(0)
-            n = len(a.track)
-            if n > 1:
-                # Least-squares slope of position over time (plain Python: tracks are short)
-                tm = sum(s[0] for s in a.track) / n
-                tt = sum((s[0] - tm) ** 2 for s in a.track)
-                if tt > 0:
-                    vx = sum((s[0] - tm) * s[1] for s in a.track) / tt
-                    vy = sum((s[0] - tm) * s[2] for s in a.track) / tt
-                    a.vx = self.ALPHA * vx + (1 - self.ALPHA) * a.vx
-                    a.vy = self.ALPHA * vy + (1 - self.ALPHA) * a.vy
-                    a.speed = math.hypot(a.vx, a.vy)
 
         # Lost tracks stay in the twin for TRACKER_BUFFER frames (ByteTrack may
         # re-acquire them) and are purged after that.
+        gone = []
         for aid in set(self.agents) - seen:
             a = self.agents[aid]
             a.missed += 1
             if a.missed > Config.TRACKER_BUFFER:
                 self.conf_est.drop(aid)
                 del self.agents[aid]
+                gone.append(aid)
+        self.motion.drop(gone)
 
     def active_agents(self) -> List[Agent]:
         """Agents detected in the current frame."""
@@ -1019,10 +1136,10 @@ class DigitalTwinEngine:
     def set_ground(self, zone_mgr: ZoneManager):
         """Switch to a new ground calibration; tracks restart in the new metres."""
         self.zone_mgr = zone_mgr
+        self.motion.reset()
         for a in self.agents.values():
             a.wx, a.wy = map(float, self.ground.to_world([[a.x, a.y]])[0])
-            a.vx = a.vy = a.speed = 0.0
-            a.track = [(self.clock, a.wx, a.wy)]
+            a.vx = a.vy = a.speed = a.walking = 0.0
 
 
 # ─── Density & Flow Estimator ─────────────────────────────────────────────────
@@ -1174,13 +1291,23 @@ class AlertEngine:
         "MEDIUM": "WARNING:  {zone} — {count} agents approaching threshold.",
     }
 
-    def generate(self, zone_risks: dict, zone_counts: dict) -> List[str]:
+    FORECAST = "FORECAST: {zone} predicted to reach capacity ({cap}) in {secs:.0f} s."
+
+    def generate(self, zone_risks: dict, zone_counts: dict,
+                 forecast_full: Optional[Dict[str, float]] = None) -> List[str]:
+        """
+        Alerts for zones at MEDIUM/HIGH risk now, and — from the 20 s
+        forecast — zones not yet full that are predicted to reach capacity.
+        """
         alerts = []
         for zone, r in zone_risks.items():
             if r["risk_label"] in ("HIGH", "MEDIUM"):
                 alerts.append(self.MSGS[r["risk_label"]].format(
                     zone=zone, count=zone_counts.get(zone, 0)
                 ))
+        for zone, (secs, cap) in sorted((forecast_full or {}).items(), key=lambda kv: kv[1][0]):
+            if 0 < secs <= Config.FORECAST_ALERT_MAX_S:
+                alerts.append(self.FORECAST.format(zone=zone, cap=cap, secs=secs))
         return alerts
 
 # ─── FBOX + HBOX Fusion ──────────────────────────────────────
@@ -1284,6 +1411,7 @@ class VideoInputHandler:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._is_file = isinstance(source, str) and Path(source).is_file()
+        self.reconnects = 0
 
     def start(self):
         self.cap = cv2.VideoCapture(self.source)
@@ -1300,9 +1428,29 @@ class VideoInputHandler:
         self._thread.start()
         print(f"[Video] Source opened: {self.source} ({self.fps:.1f} FPS)")
 
+    def _reconnect(self):
+        """A live stream stopped delivering: reopen it, backing off up to 30 s between tries."""
+        delay = 1.0
+        while self._running:
+            print(f"[Video] No frames from {self.source}; reconnecting in {delay:.0f} s …")
+            time.sleep(delay)
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = cv2.VideoCapture(self.source)
+            if self.cap.isOpened():
+                ok, _ = self.cap.read()
+                if ok:
+                    self.reconnects += 1
+                    print(f"[Video] Reconnected to {self.source}")
+                    return
+            delay = min(delay * 2, 30.0)
+
     def _capture_loop(self):
         period = 1.0 / self.fps
         next_t = time.perf_counter()
+        fails  = 0
         while self._running:
             ret, frame = self.cap.read()
             if not ret:
@@ -1310,8 +1458,16 @@ class VideoInputHandler:
                     # Loop recorded video
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 else:
-                    time.sleep(0.01)
+                    fails += 1
+                    # ~2 s of failed reads: the camera or network is gone
+                    if fails >= Config.STREAM_RETRY_READS:
+                        self._reconnect()
+                        fails = 0
+                        next_t = time.perf_counter()
+                    else:
+                        time.sleep(0.01)
                 continue
+            fails = 0
             if self._is_file:
                 # Pace playback to the file's frame rate
                 next_t += period
@@ -1513,9 +1669,14 @@ class TwinPipeline:
     PyTorch — CDTPipeline puts the detectors in front of it and
     ReplayPipeline feeds it recorded tracks.
     """
-    model_name = "replay"
-    device     = "cpu"
-    calib_name = "stream"          # names the saved auto-calibration file
+    model_name  = "replay"
+    device      = "cpu"
+    calib_name  = "stream"         # names the saved auto-calibration file
+    source_name = "stream"         # shown on the dashboard
+    mode        = "live"           # "live" (detectors) or "replay" (recorded tracks)
+    dense       = False            # dense-crowd mode (CDTPipeline)
+    forecast_warnings = None       # set by TwinService: zones the forecast sees filling up
+    det_counts  = {}               # people found by body / head / point this frame
 
     def __init__(self, record_experience: bool = True):
         self.fusion      = DataFusionLayer()
@@ -1523,8 +1684,6 @@ class TwinPipeline:
         self.risk_est    = RiskEstimator()
         self.alerts      = AlertEngine()
         self.sim_trigger = SimulationTrigger()
-        # Load ETH/UCY mobility priors (zone names don't depend on resolution)
-        self.fusion.load_mobility_prior(Config.ETH_UCY_PATH, ZoneManager.names())
         self._auto_ground: Optional[GroundPlane] = None
         self._auto_tried  = False
         self._feet_rows   = deque(maxlen=5000)       # recent feet rows, to find the floor's far edge
@@ -1573,17 +1732,33 @@ class TwinPipeline:
                              and not self._auto_tried else None)
         self.zone_mgr     = ZoneManager(h, w, ground)
         self.conf_est     = ConfidenceEstimator()
-        # Set zone calibration from mobility priors
-        for zone, weight in self.fusion.mobility.items():
-            self.conf_est.set_zone_calibration(zone, weight)
         self.dt           = DigitalTwinEngine(self.zone_mgr, self.conf_est, self.frame_s)
         self.density      = DensityFlowEstimator(self.zone_mgr)
+        self.memory       = SceneMemory(Floor(ground.boundary()))    # flow + entries, in these metres
+        self._flow        = None
+        self._flow_at     = -1e9
+        self.obstacles    = np.zeros((0, 2))                          # learned pillars / railings
+        self._obst_at     = 0.0
         self.scene_version = getattr(self, "scene_version", 0) + 1     # 3D twin rebuilds its scene
 
     def _initial_ground(self, h: int, w: int) -> GroundPlane:
-        """Calibration file, else an earlier estimate for this stream, else flat."""
+        """
+        Calibration file, else an earlier estimate for this stream (this run,
+        or saved by an earlier run as calibration/auto_<name>.json), else flat.
+        """
         if Config.CALIBRATION_FILE:
             return GroundPlane.from_file(Config.CALIBRATION_FILE, h, w)
+        if self._auto_ground is None and not self._auto_tried and Config.AUTO_CALIBRATE \
+                and Config.REUSE_AUTO_CALIBRATION:
+            saved = Path("calibration") / f"auto_{self.calib_name}.json"
+            if saved.exists():
+                try:
+                    g = GroundPlane.from_file(saved, h, w)
+                    g.source = "pedestrians"                # still an estimate, not a measurement
+                    self._auto_ground, self._auto_tried = g, True
+                    print(f"[Calibration] Reusing {saved.as_posix()} (delete it to estimate again)")
+                except (ValueError, KeyError, OSError) as e:
+                    print(f"[Calibration] Ignoring {saved.as_posix()}: {e}")
         if self._auto_ground is not None and (self._auto_ground.h, self._auto_ground.w) == (h, w):
             return self._auto_ground
         return GroundPlane.flat(h, w)
@@ -1594,6 +1769,9 @@ class TwinPipeline:
         self.zone_mgr = ZoneManager(self._h, self._w, ground)
         self.dt.set_ground(self.zone_mgr)
         self.density.zone_mgr = self.zone_mgr
+        self.memory   = SceneMemory(Floor(ground.boundary()))      # new metres: learn afresh
+        self._flow, self._flow_at = None, -1e9
+        self.obstacles, self._obst_at = np.zeros((0, 2)), self.dt.clock
         self.scene_version += 1
 
     def _update_floor(self):
@@ -1612,6 +1790,7 @@ class TwinPipeline:
         self.zone_mgr = ZoneManager(self._h, self._w, ground)
         self.dt.zone_mgr = self.zone_mgr
         self.density.zone_mgr = self.zone_mgr
+        self.memory.set_floor(Floor(ground.boundary()))              # the far edge is a wall now
         self.scene_version += 1
 
     def _finish_calibration(self):
@@ -1665,6 +1844,8 @@ class TwinPipeline:
                             for n, z in zm.zones.items()],
             "camera":      ground.camera(),
             "calibration": ground.describe(),
+            "obstacles":   np.round(self.obstacles, 2).tolist(),     # cell centres, metres
+            "obstacle_cell": round(self.memory.cell, 2),
             "frame_size":  [self._w, self._h],
             "horizon_s":   round(Config.PRED_HORIZON * Config.SIM_STEP_S, 1),
         }
@@ -1675,13 +1856,17 @@ class TwinPipeline:
                        captured_at: Optional[float] = None,
                        frame_idx: Optional[int] = None,
                        t0: Optional[float] = None,
-                       t_detect: Optional[float] = None) -> dict:
+                       t_detect: Optional[float] = None,
+                       to_ref: Optional[np.ndarray] = None) -> dict:
         """
         Run one frame of tracked people (dicts with id, cx, cy, confidence and
         optionally the box x1..y2, or feet fy and box height bh) through
         Layers A and D–M and return the dashboard payload. frame_gap is the
         time since the previous processed frame (in processed frames);
         captured_at is the capture time used for the end-to-end latency.
+        to_ref (3×3), from camera-motion compensation, maps this frame's
+        pixels to the reference frame the twin measures in; boxes are still
+        drawn where they are in this frame.
         """
         t0 = time.perf_counter() if t0 is None else t0
         t_detect = t0 if t_detect is None else t_detect
@@ -1697,16 +1882,23 @@ class TwinPipeline:
                 det.setdefault("bh", det["y2"] - det["y1"])
             else:
                 det.setdefault("fy", det["cy"])       # no box: the given point
+        moving = to_ref is not None and not np.allclose(to_ref, np.eye(3))
+        if moving and det_list:                      # measure feet where they are on the ground
+            ref = apply_transform(to_ref, [[d["fx"], d["fy"]] for d in det_list])
+            for d, (fx, fy) in zip(det_list, ref):
+                d["fx"], d["fy"] = float(fx), float(fy)
+        for det in det_list:
             det.setdefault("zone", self.zone_mgr.assign(det["fx"], det["fy"]))
 
         # ── Ground calibration from people's heights (first frames only) ──
         if self._calibrator is not None:
-            self._calibrator.add(det_list)
+            self._calibrator.add(det_list, hbox_detections)
             if self._calibrator.ready:
                 self._finish_calibration()
 
         # ── Where the floor ends: above the highest feet seen ─────────────
-        self._feet_rows.extend(d["fy"] for d in det_list if d["confidence"] >= 0.4)
+        self._feet_rows.extend(d["fy"] for d in det_list
+                               if d["confidence"] >= 0.4 and d.get("src", "body") == "body")
         if len(self._feet_rows) >= Config.FLOOR_MIN_FEET and self._frame_n % 25 == 1:
             self._update_floor()
 
@@ -1721,6 +1913,21 @@ class TwinPipeline:
 
         # ── Post-update state ─────────────────────────────────────────────
         agents_now = self.dt.active_agents()
+        # What the scene teaches: lanes (flow field) and where people come in
+        self.memory.observe(self.dt.clock, [a.id for a in agents_now],
+                            [[a.wx, a.wy] for a in agents_now],
+                            [[a.vx, a.vy] for a in agents_now],
+                            [a.walking for a in agents_now])
+        if self.dt.clock - self._flow_at >= 1.0:           # the 3D twin forecasts once a second
+            self._flow, self._flow_at = self.memory.flow_field(), self.dt.clock
+        if self.dt.clock - self._obst_at >= Config.OBSTACLE_EVERY_S:
+            self._obst_at = self.dt.clock
+            obst = self.memory.obstacles()
+            if obst.shape != self.obstacles.shape or not np.allclose(obst, self.obstacles):
+                if len(obst) != len(self.obstacles):
+                    print(f"[Twin] {len(obst)} floor cells learned as obstacles (never walked on)")
+                self.obstacles = obst
+                self.scene_version += 1                        # the 3D twin redraws them
         z_dens     = self.density.zone_density(agents_now)
         z_counts   = self.zone_mgr.count(agents_now)
         z_flow     = self.density.zone_flow(agents_now)
@@ -1752,9 +1959,13 @@ class TwinPipeline:
             )
 
         # ── Alert engine ──────────────────────────────────────────────────
-        alert_msgs = self.alerts.generate(zone_risks, z_counts)
+        # The 3D twin's latest forecast, if it is fresh and for this scene
+        fw = self.forecast_warnings
+        fresh = fw is not None and fw["scene_version"] == self.scene_version and \
+            time.time() - fw["at"] <= 3.0 / Config.FORECAST_HZ
+        alert_msgs = self.alerts.generate(zone_risks, z_counts, fw["full"] if fresh else None)
 
-        # ── Simulation trigger (the 20 s forecast itself runs in the 3D twin) ──
+        # ── Simulation trigger: flags the 20 s forecast (TwinService runs it) ──
         trigger_reasons = self.sim_trigger.reasons(
             trend_res["crowd_trend"],
             risk_res["risk_label"],
@@ -1764,6 +1975,9 @@ class TwinPipeline:
 
         # ── Heatmap overlay ───────────────────────────────────────────────
         dmap       = self.density.density_map(agents_now, self._h, self._w)
+        from_ref   = np.linalg.inv(to_ref) if moving else None
+        if moving:                                   # the twin's frame → where it is in this image
+            dmap = cv2.warpAffine(dmap, from_ref[:2], (self._w, self._h))
         heat       = (dmap * 255).astype(np.uint8)
         heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
         # Without SEND_FRAME (or without video, in replay) no video pixels are sent
@@ -1775,9 +1989,12 @@ class TwinPipeline:
             col = {"HIGH": (50, 50, 220),
                     "MEDIUM": (0, 165, 255),
                     "LOW":    (80, 200, 80)}.get(rl, (128, 128, 128))
-            cv2.rectangle(overlay, (z.x1, z.y1), (z.x2, z.y2), col, 2)
+            corners = np.array([[z.x1, z.y1], [z.x2, z.y1], [z.x2, z.y2], [z.x1, z.y2]], float)
+            if moving:
+                corners = apply_transform(from_ref, corners)
+            cv2.polylines(overlay, [corners.round().astype(np.int32)], True, col, 2)
             cv2.putText(overlay, f"{z.name}: {rl}",
-                        (z.x1 + 6, z.y1 + 22),
+                        (int(corners[0, 0]) + 6, int(corners[0, 1]) + 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
 
         # ── Draw tracked full-body boxes ──────────────────────────────────
@@ -1794,8 +2011,8 @@ class TwinPipeline:
 
             label = f"#{det['id']} {det['confidence']:.2f}"
 
-            # Full-body box = yellow
-            col = (0, 255, 255)
+            # Full-body box = yellow; a person found only by their head = orange
+            col = (0, 255, 255) if det.get("src", "body") == "body" else (0, 140, 255)
 
             cv2.rectangle(
                 overlay,
@@ -1886,6 +2103,11 @@ class TwinPipeline:
             },
             "device":           self.device,
             "model":            self.model_name,
+            "source":           self.source_name,
+            "mode":             self.mode,
+            "dense_mode":       self.dense,
+            "camera_moving":    bool(moving),           # motion compensation active
+            "detections":       dict(self.det_counts),   # people found by body / head / point
             "frame_size":       [self._w, self._h],
             "source_fps":       round(self.source_fps, 2),
             "calibration": {
@@ -1903,7 +2125,6 @@ class TwinPipeline:
                 "iot_exit":       fusion_result["iot_exit_delta"],
                 "conf_scale":     fusion_result["conf_scale"],
                 "iot_mode":       self.fusion.iot.mode,
-                "mobility_prior": self.fusion.mobility_source,
             },
             "zones": {
                 n: {
@@ -1971,7 +2192,13 @@ class TwinPipeline:
             "ids":           [a.id for a in agents_now],
             "pos":           np.array([[a.wx, a.wy] for a in agents_now], float).reshape(-1, 2),
             "vel":           np.array([[a.vx, a.vy] for a in agents_now], float).reshape(-1, 2),
+            "vel_std":       np.array([a.vel_std for a in agents_now], float),
             "speed":         [a.speed for a in agents_now],
+            "flow":          self._flow,
+            "arrivals":      self.memory.arrivals(self.dt.clock),
+            "floor":         Floor(self.zone_mgr.ground.boundary()),
+            "obstacles":     self.obstacles,
+            "obstacle_r":    self.memory.cell * 0.75,
             "zone":          [zone_ix.get(a.zone, -1) for a in agents_now],
             "zones":         [{"name": n, "count": z_counts.get(n, 0),
                                "density": round(z_dens.get(n, 0.0), 3),
@@ -2015,10 +2242,13 @@ class ReplayPipeline(TwinPipeline):
     time (looping), so the twin, forecast and dashboard run without PyTorch
     or a GPU. Detection and training happen elsewhere.
     """
+    mode = "replay"
+
     def __init__(self, path: str, size: Optional[Tuple[int, int]] = None,
                  fps: Optional[float] = None):
         self.replay = TrackReplay(path, size=size, fps=fps)
         p = Path(path)
+        self.source_name = p.as_posix()
         self.calib_name = "replay_" + (p.parent.parent.name if p.name == "gt.txt" else p.stem)
         super().__init__(record_experience=False)
         h, w = self.replay.size
@@ -2068,15 +2298,18 @@ class CDTPipeline(TwinPipeline):
     """Live pipeline: video → YOLO26 body + head detection → ByteTrack → twin."""
 
     def __init__(self, source=None, record_experience: bool = True):
-        # Detection needs PyTorch; the twin-only mode never imports it
+        # Detection needs PyTorch; the twin-only mode never imports it.
+        # Keep Ultralytics off the network (update checks, telemetry); it reads
+        # this once on import. Set YOLO_OFFLINE=0 to allow it.
+        os.environ.setdefault("YOLO_OFFLINE", "1")
         from ultralytics import YOLO
         from ultralytics.cfg import DEFAULT_CFG_DICT
         import supervision as sv
         self._sv = sv
 
         self.video  = VideoInputHandler(source) if source is not None else None
-        self.calib_name = (Path(source).stem if isinstance(source, str) and Path(source).is_file()
-                           else f"camera{source}" if isinstance(source, int) else "stream")
+        self._name_source(source)
+        self._switch_lock = threading.Lock()     # held while a frame is processed
         self.device = resolve_device(Config.DEVICE)
         self.half   = Config.HALF and self.device != "cpu"
         # Newer Ultralytics sets FP16 with `quantize`, older versions with `half`
@@ -2111,10 +2344,64 @@ class CDTPipeline(TwinPipeline):
 
         print(f"[CDT] FBOX model: {fbox_path}")
         print(f"[CDT] HBOX model: {hbox_path}")
+
+        # ── Dense-crowd head points (dense.py), if weights are in place ──
+        self.points_model = None
+        if Config.DENSE_MODEL and Path(Config.DENSE_MODEL).exists():
+            from dense import PointCounter
+            try:
+                self.points_model = PointCounter(Config.DENSE_MODEL, self.device,
+                                                 Config.DENSE_THRESHOLD, half=self.half)
+                print(f"[CDT] Dense-crowd point model: {Config.DENSE_MODEL}")
+            except Exception as e:
+                print(f"[CDT] Dense-crowd point model not loaded ({e}); using head boxes only.")
         print(f"[CDT] Device: {self.device}{' (FP16)' if self.half else ''}")
 
         self._hbox_last: List[dict] = []
+        self._points_last = (np.zeros((0, 2)), np.zeros(0))
+        self.dense = False                       # dense mode: heads at high resolution + points
+        self.camera_motion = CameraMotion()
+        self.det_counts = {"bodies": 0, "heads": 0, "points": 0}
         super().__init__(record_experience)
+
+    def _name_source(self, source):
+        is_file = isinstance(source, str) and Path(source).is_file()
+        self.calib_name  = (Path(source).stem if is_file
+                            else f"camera{source}" if isinstance(source, int) else "stream")
+        self.source_name = (Path(source).name if is_file
+                            else f"camera {source}" if isinstance(source, int)
+                            else re.sub(r"//[^/@]*@", "//", str(source)))     # no passwords on screen
+
+    def switch_source(self, source):
+        """
+        Switch to another video input: open it, then start a fresh twin on it
+        and estimate its ground again (the old calibration belongs to the old
+        camera). Raises RuntimeError if the source can't be opened.
+        """
+        new = VideoInputHandler(source)
+        new.start()
+        with self._switch_lock:
+            old, self.video = self.video, new
+            if old is not None:
+                old.stop()
+            self._name_source(source)
+            Config.CALIBRATION_FILE = None            # --calibration was for the first source
+            self._auto_ground, self._auto_tried = None, False
+            self._feet_rows.clear()
+            self._floor_top = None
+            self.fusion = DataFusionLayer()
+            self.trend  = TrendPredictor()
+            self._proc_times.clear()
+            self._hbox_last = []
+            self._points_last = (np.zeros((0, 2)), np.zeros(0))
+            self.dense = False
+            self.camera_motion = CameraMotion()
+            h, w = fit_within(*new.resolution, Config.FRAME_HEIGHT, Config.FRAME_WIDTH)
+            self.configure(h, w, new.fps)
+        if self.experience is not None and not self._flushing.is_set():
+            self._flushing.set()
+            threading.Thread(target=self._flush_experience, daemon=True).start()
+        print(f"[CDT] Switched to {self.source_name} at {w}x{h}.")
 
     def configure(self, h: int, w: int, source_fps: float):
         super().configure(h, w, source_fps)
@@ -2152,9 +2439,12 @@ class CDTPipeline(TwinPipeline):
 
     def _pipeline_loop(self):
         last_seq: Optional[int] = None
+        video = self.video
 
         while self._running:
-            item = self.video.read()
+            if self.video is not video:          # source switched: frame numbers restart
+                video, last_seq = self.video, None
+            item = video.read()
             # Wait for a frame FRAME_SKIP source frames after the last one
             if item is None or (last_seq is not None and item[1] - last_seq < Config.FRAME_SKIP):
                 time.sleep(0.002)
@@ -2163,12 +2453,15 @@ class CDTPipeline(TwinPipeline):
             gap      = 1.0 if last_seq is None else (seq - last_seq) / Config.FRAME_SKIP
             last_seq = seq
 
-            try:
-                payload = self.process_frame(frame, frame_gap=gap,
-                                             captured_at=captured_at, frame_idx=seq)
-            except Exception as e:
-                print(f"[CDT] Frame {seq} failed: {e}")
-                continue
+            with self._switch_lock:
+                if self.video is not video:
+                    continue
+                try:
+                    payload = self.process_frame(frame, frame_gap=gap,
+                                                 captured_at=captured_at, frame_idx=seq)
+                except Exception as e:
+                    print(f"[CDT] Frame {seq} failed: {e}")
+                    continue
             self._broadcast(payload)
 
     def process_frame(self, frame: np.ndarray, frame_gap: float = 1.0,
@@ -2181,67 +2474,135 @@ class CDTPipeline(TwinPipeline):
         if frame.shape[:2] != (self._h, self._w):
             frame = cv2.resize(frame, (self._w, self._h))
 
-        # ── Edge AI: separate full-body and head detection ───────────────
-        # FBOX is the only detector used for tracking and agent state.
+        # ── Edge AI: full-body, head and (dense crowds) head-point detection ──
         fbox_detections = self.detect(
             self.fbox_model, frame, Config.YOLO_CONF, Config.YOLO_IMGSZ
         )
 
-        # HBOX = head detector
-        if self._frame_n % max(1, Config.HBOX_EVERY) == 0:
+        # HBOX = head detector; in dense mode at high resolution for tiny heads
+        if self.dense or self._frame_n % max(1, Config.HBOX_EVERY) == 0:
             self._hbox_last = self.detect(
-                self.hbox_model, frame, Config.HBOX_CONF, Config.HBOX_IMGSZ
+                self.hbox_model, frame,
+                Config.HBOX_CONF_DENSE if self.dense else Config.HBOX_CONF,
+                Config.HBOX_IMGSZ_DENSE if self.dense else Config.HBOX_IMGSZ,
             )
         hbox_detections = self._hbox_last
+
+        # Head points from the dense-crowd model (when loaded): every frame in
+        # dense mode, else now and then as a probe — overhead and drone views
+        # show heads the head detector can't see
+        probe = (self.points_model is not None and not self.dense and Config.DENSE_AUTO
+                 and self._frame_n % max(1, Config.DENSE_PROBE_EVERY) == 0)
+        if self.points_model is not None and (probe or (
+                self.dense and self._frame_n % max(1, Config.DENSE_EVERY) == 0)):
+            self._points_last = self.points_model(frame)
+        use_points = self.points_model is not None and (self.dense or probe)
         t_detect = time.perf_counter()
 
-        xyxy = np.array(
-            [d["box"] for d in fbox_detections],
-            dtype=np.float32
-        ).reshape(-1, 4)
+        # ── People with no body box: heads (or head points) ───────────────
+        bodies = np.array([d["box"] for d in fbox_detections], np.float32).reshape(-1, 4)
+        extra_heads, extra_conf, extra_src = self._unmatched_heads(
+            bodies, hbox_detections, self._points_last if use_points else None)
+        if Config.DENSE_AUTO:
+            n_x = len([h for h in hbox_detections
+                       if not self._inside_any(h["box"], bodies)])
+            if use_points:                      # the point model sees heads the detector can't
+                n_x = max(n_x, int((np.array(extra_src) == "point").sum()))
+            on  = n_x >= Config.DENSE_MIN_HEADS and n_x >= Config.DENSE_HEAD_RATIO * len(bodies)
+            off = n_x < Config.DENSE_MIN_HEADS / 2 or n_x < 0.5 * Config.DENSE_HEAD_RATIO * len(bodies)
+            if (on and not self.dense) or (off and self.dense):
+                self.dense = on
+                print(f"[CDT] Dense mode {'on' if on else 'off'} ({n_x} heads without a body, "
+                      f"{len(bodies)} bodies)")
 
-        confidence = np.array(
-            [d["confidence"] for d in fbox_detections],
-            dtype=np.float32
-        )
+        # Heads become whole-person boxes: head on top, feet from the ground geometry
+        pseudo = np.zeros((0, 4), np.float32)
+        if len(extra_heads):
+            feet, body_h = self.zone_mgr.ground.feet_from_heads(extra_heads)
+            half_w = np.maximum((extra_heads[:, 2] - extra_heads[:, 0]) * 1.1, 2.0)
+            pseudo = np.column_stack([feet[:, 0] - half_w, extra_heads[:, 1],
+                                      feet[:, 0] + half_w, feet[:, 1]]).astype(np.float32)
+        n_b = len(bodies)
+        xyxy = np.vstack([bodies, pseudo])
+        conf = np.concatenate([[d["confidence"] for d in fbox_detections], extra_conf]).astype(np.float32)
+        # The tracker only starts tracks from confident detections: heads passed
+        # their own threshold, so they are tracked at a neutral confidence
+        track_conf = conf.copy()
+        track_conf[n_b:] = np.maximum(track_conf[n_b:], Config.YOLO_CONF + 0.2)
+        src = np.array(["body"] * n_b + list(extra_src))
+        dets = self._sv.Detections(xyxy=xyxy.reshape(-1, 4), confidence=track_conf,
+                                   class_id=np.where(src == "body", 0, 1).astype(int),
+                                   data={"src": src, "conf": conf})
+        self.det_counts = {"bodies": n_b, "heads": int((src == "head").sum()),
+                           "points": int((src == "point").sum())}
 
-        class_id = np.zeros(
-            len(fbox_detections),
-            dtype=int
-        )
-
-        dets = self._sv.Detections(
-            xyxy=xyxy,
-            confidence=confidence,
-            class_id=class_id
-        )
         # ── ByteTrack ─────────────────────────────────────────────────────
         tracked = self.tracker.update_with_detections(dets)
 
         det_list = []
-        if tracked.tracker_id is not None:
-            for xyxy, tid, conf in zip(
-                tracked.xyxy, tracked.tracker_id, tracked.confidence
+        if tracked.tracker_id is not None and len(tracked):
+            for (x1, y1, x2, y2), tid, c, s in zip(
+                tracked.xyxy.astype(float), tracked.tracker_id,
+                tracked.data["conf"], tracked.data["src"]
             ):
-                x1, y1, x2, y2 = map(float, xyxy)
-                cx = float((x1 + x2) / 2)
-                cy = float((y1 + y2) / 2)
                 det_list.append({
                     "id":         int(tid),
                     "x1":         x1,
                     "y1":         y1,
                     "x2":         x2,
                     "y2":         y2,
-                    "cx":         cx,
-                    "cy":         cy,
-                    "confidence": float(conf),
+                    "cx":         (x1 + x2) / 2,
+                    "cy":         (y1 + y2) / 2,
+                    "confidence": float(c),
+                    "src":        str(s),
+                    # Feet guessed from a head are less certain than a body box's
+                    "noise_scale": 1.0 if s == "body" else 1.5,
                 })
+
+        # ── Camera motion: measure people against the ground, not the image ──
+        to_ref = None
+        if Config.STABILIZE:
+            to_ref = self.camera_motion.update(frame, xyxy)
+            if self.camera_motion.reanchored:        # new reference: positions jump, restart motion
+                self.dt.motion.reset()
+                self.memory = SceneMemory(Floor(self.zone_mgr.ground.boundary()))
+                print(f"[CDT] Camera {'moving' if self.camera_motion.moving else 'moved'}: "
+                      f"motion compensation {'on' if self.camera_motion.moving else 're-anchored'}")
 
         return self.process_tracks(
             det_list, frame=frame, hbox_detections=hbox_detections,
             frame_gap=frame_gap, captured_at=captured_at, frame_idx=frame_idx,
-            t0=t0, t_detect=t_detect,
+            t0=t0, t_detect=t_detect, to_ref=to_ref,
         )
+
+    @staticmethod
+    def _inside_any(box, bodies: np.ndarray) -> bool:
+        """Is the centre of `box` inside any body box (the same person)?"""
+        if not len(bodies):
+            return False
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        return bool(((bodies[:, 0] <= cx) & (cx <= bodies[:, 2]) &
+                     (bodies[:, 1] <= cy) & (cy <= bodies[:, 3])).any())
+
+    def _unmatched_heads(self, bodies: np.ndarray, heads: List[dict], points=None):
+        """
+        Heads of people the body detector missed, as head boxes (N, 4), their
+        confidences and where they came from ("head" / "point"). With head
+        points (dense model) the points are used — they find far more heads —
+        each given a head box sized by how close its neighbours are.
+        """
+        if not Config.HEADS_AS_PEOPLE:
+            return np.zeros((0, 4), np.float32), np.zeros(0), []
+        if points is not None and len(points[0]):
+            from dense import head_sizes
+            pts, sc = points
+            s = head_sizes(pts) / 2
+            boxes = np.column_stack([pts[:, 0] - s, pts[:, 1] - s, pts[:, 0] + s, pts[:, 1] + s])
+            keep = [i for i, b in enumerate(boxes) if not self._inside_any(b, bodies)]
+            return boxes[keep].astype(np.float32), sc[keep], ["point"] * len(keep)
+        keep = [h for h in heads if not self._inside_any(h["box"], bodies)]
+        return (np.array([h["box"] for h in keep], np.float32).reshape(-1, 4),
+                np.array([h["confidence"] for h in keep], float), ["head"] * len(keep))
 
     def stop(self):
         super().stop()
@@ -2255,21 +2616,41 @@ class TwinService:
     """
     The 3D digital twin (/twin), separate from the dashboard. It reads the
     pipeline's latest crowd state in metres, streams it to the 3D viewer at
-    TWIN_HZ, and runs the short-horizon forecast (Layer K) — the social force
-    model PRED_HORIZON × SIM_STEP_S = 20 s ahead, on the walkable floor set up
-    from the calibration — every 1/FORECAST_HZ s. It only works while a viewer
-    is connected.
+    TWIN_HZ, and runs the short-horizon forecast (Layer K) — the anticipatory
+    social force model in forecast.py, PRED_HORIZON × SIM_STEP_S = 20 s ahead,
+    on the walkable floor set up from the calibration — every 1/FORECAST_HZ s.
+    It only works while a viewer is connected.
     """
     def __init__(self, pipeline: TwinPipeline):
         self.pipeline  = pipeline
-        self.simulator = SocialForceModel()
+        self.simulator = CrowdForecaster(ForecastParams(steps=Config.PRED_HORIZON,
+                                                        step_s=Config.SIM_STEP_S,
+                                                        substeps=Config.SIM_SUBSTEPS))
         self.latest_forecast: Optional[dict] = None
         self._scene_sent = -1
         self._running    = False
+        # The twin scores its own forecasts against what then happens (per scene)
+        self.skill       = ForecastSkill(Config.PRED_HORIZON, Config.SIM_STEP_S)
+        self._skill_scene = None
+        self._observed_t  = None
 
     def start(self):
         self._running = True
         threading.Thread(target=self._loop, daemon=True).start()
+
+    def _zone_counts_now(self, snap: dict) -> np.ndarray:
+        zm = self.pipeline.zone_mgr
+        ix = zm.index_many(zm.ground.to_image(snap["pos"])) if len(snap["pos"]) else np.zeros(0, int)
+        return np.bincount(ix[ix >= 0], minlength=len(zm.zones)).astype(float)
+
+    def _track_skill(self, snap: dict):
+        zones = id(self.pipeline.zone_mgr)
+        if zones != self._skill_scene:                           # new zones / metres
+            self.skill = ForecastSkill(Config.PRED_HORIZON, Config.SIM_STEP_S)
+            self._skill_scene = zones
+        if snap["t"] != self._observed_t:
+            self.skill.observe(snap["t"], self._zone_counts_now(snap))
+            self._observed_t = snap["t"]
 
     def stop(self):
         self._running = False
@@ -2282,17 +2663,27 @@ class TwinService:
         next_state = next_forecast = 0.0
         while self._running:
             snap = self.pipeline.twin_snapshot
-            if twin_manager.active and snap is not None:
-                if snap["scene_version"] != self._scene_sent:
+            viewers = bool(twin_manager.active)
+            # Layer J → K: a flagged scene is forecast even with no one watching
+            flagged = Config.FORECAST_ALERTS and snap is not None and snap["trigger"]["active"]
+            if snap is not None and (viewers or flagged):
+                self._track_skill(snap)
+                if viewers and snap["scene_version"] != self._scene_sent:
                     self._send(self.pipeline.twin_scene())
                     self._scene_sent = snap["scene_version"]
-                if time.time() >= next_state:
+                if viewers and time.time() >= next_state:
                     self._send(self.state(snap))
                     next_state = time.time() + 1.0 / Config.TWIN_HZ
                 if time.time() >= next_forecast:
                     try:
-                        self.latest_forecast = self.forecast(snap)
-                        self._send(self.latest_forecast)
+                        self.latest_forecast = self.forecast(snap, record=True)
+                        self.pipeline.forecast_warnings = {
+                            "at": time.time(), "scene_version": snap["scene_version"],
+                            "full": {z["name"]: (z["full_at_s"], z["capacity"])
+                                     for z in self.latest_forecast["zones"]
+                                     if z["full_at_s"] is not None}}
+                        if viewers:
+                            self._send(self.latest_forecast)
                     except Exception as e:
                         print(f"[Twin] Forecast failed: {e}")
                     next_forecast = time.time() + 1.0 / Config.FORECAST_HZ
@@ -2310,35 +2701,50 @@ class TwinService:
                 "scene_version": snap["scene_version"], "agents": agents,
                 "zones": snap["zones"], "trigger": snap["trigger"], "risk": snap["risk"]}
 
-    def forecast(self, snap: dict) -> dict:
+    def forecast(self, snap: dict, record: bool = False) -> dict:
         """
-        Layer K: every person 20 s ahead with the social force model, from
-        their tracked position and velocity, staying on the walkable floor.
-        Returns each person's path, and each zone's predicted count and
-        density per step and when it would reach its capacity.
+        Layer K: the crowd 20 s ahead (forecast.CrowdForecaster) from each
+        person's filtered position and velocity: walkers follow their heading
+        and the scene's learned lanes, standing people stay, people avoid
+        those they are about to meet, leave through the edges of the view and
+        slide along walls, and newcomers arrive at the learned rate. Returns
+        each person's path (with the step they enter / leave), and each
+        zone's predicted count and density per step — calibrated by how well
+        the twin's earlier forecasts did (ForecastSkill) — and when it would
+        reach its capacity. `record` keeps the forecast for that scoring.
         """
         t0 = time.perf_counter()
         zm = self.pipeline.zone_mgr
         ground = zm.ground
-        steps, n = Config.PRED_HORIZON, len(snap["ids"])
-        paths = np.zeros((n, steps + 1, 2))
-        if n:
-            floor = ground.visible_ground()
-            traj  = self.simulator.simulate(snap["pos"], snap["vel"], steps, Config.SIM_STEP_S,
-                                            bounds=floor if len(floor) >= 3 else None)
-            paths = np.stack([snap["pos"]] + traj, axis=1)
+        steps = Config.PRED_HORIZON
+        res = self.simulator.run(snap["pos"], snap["vel"], snap.get("vel_std"),
+                                 floor=snap.get("floor"), flow=snap.get("flow"),
+                                 arrivals=snap.get("arrivals", (0.0, [])),
+                                 obstacles=snap.get("obstacles"),
+                                 obstacle_r=snap.get("obstacle_r", 0.75))
+        paths, n = res.paths, len(res.paths)
+        active = res.active()
         zone_ix = zm.index_many(ground.to_image(paths.reshape(-1, 2))).reshape(n, steps + 1)
+        zone_ix = np.where(active, zone_ix, -1)
+        ids = list(snap["ids"]) + [-(k + 1) for k in range(n - res.n_tracked)]
+        raw = np.stack([(zone_ix == k).sum(axis=0) for k in range(len(zm.zones))], axis=1) \
+            .astype(float)                                   # (steps + 1, zones)
+        now = self._zone_counts_now(snap)
+        cal = np.maximum(self.skill.calibrate(now, raw), 0.0)
+        if record:
+            self.skill.add(snap["t"], now, raw)
         zones = []
         for k, (name, z) in enumerate(zm.zones.items()):
-            counts = (zone_ix == k).sum(axis=0)
+            counts = cal[:, k]
             dens   = counts / z.area_m2 if z.area_m2 >= 1.0 else np.zeros(steps + 1)
             full   = np.nonzero(counts >= z.capacity)[0]
             zones.append({
-                "name":      name,
-                "counts":    counts.tolist(),
-                "density":   np.round(dens, 3).tolist(),
-                "capacity":  z.capacity,
-                "full_at_s": round(float(full[0]) * Config.SIM_STEP_S, 1) if len(full) else None,
+                "name":         name,
+                "counts":       np.round(counts, 1).tolist(),
+                "counts_agents": raw[:, k].astype(int).tolist(),   # before calibration
+                "density":      np.round(dens, 3).tolist(),
+                "capacity":     z.capacity,
+                "full_at_s":    round(float(full[0]) * Config.SIM_STEP_S, 1) if len(full) else None,
             })
         return {
             "type":          "forecast",
@@ -2347,10 +2753,58 @@ class TwinService:
             "scene_version": snap["scene_version"],
             "step_s":        Config.SIM_STEP_S,
             "steps":         steps,
-            "ids":           snap["ids"],
+            "ids":           ids,
             "paths":         np.round(paths.reshape(n, -1), 2).tolist(),
+            "enter_step":    res.enter_step.tolist(),     # arrivals appear at this step
+            "exit_step":     res.exit_step.tolist(),      # left the view at this step (−1: stays)
+            "n_tracked":     res.n_tracked,
             "zones":         zones,
+            "skill":         self.skill.report(),         # the twin's recent forecast errors
             "compute_ms":    round((time.perf_counter() - t0) * 1000, 1),
+        }
+
+
+    def whatif(self, snap: dict, level: float = 0.8) -> dict:
+        """
+        What if this crowd panicked now (forecast.CrowdForecaster.panic)?
+        Not a prediction: an escape-panic scenario over WHATIF_STEPS steps —
+        people's paths, how fast the area empties, and where local density
+        passes 5 persons/m² (crush risk). Same shape as a forecast, so the 3D
+        twin can play it on the same timeline.
+        """
+        t0 = time.perf_counter()
+        zm = self.pipeline.zone_mgr
+        steps = Config.WHATIF_STEPS
+        res = self.simulator.panic(snap["pos"], snap["vel"], snap.get("vel_std"),
+                                   floor=snap.get("floor"), obstacles=snap.get("obstacles"),
+                                   obstacle_r=snap.get("obstacle_r", 0.75), level=level,
+                                   steps=steps, step_s=Config.SIM_STEP_S)
+        n = len(res.paths)
+        active = res.active()
+        zone_ix = zm.index_many(zm.ground.to_image(res.paths.reshape(-1, 2))).reshape(n, steps + 1) \
+            if n else np.zeros((0, steps + 1), int)
+        zone_ix = np.where(active, zone_ix, -1)
+        zones = []
+        for k, (name, z) in enumerate(zm.zones.items()):
+            counts = (zone_ix == k).sum(axis=0)
+            dens = counts / z.area_m2 if z.area_m2 >= 1.0 else np.zeros(steps + 1)
+            local = np.where(zone_ix == k, res.density, 0.0)
+            full = np.nonzero(counts >= z.capacity)[0]
+            zones.append({"name": name, "counts": counts.tolist(), "density": np.round(dens, 3).tolist(),
+                          "capacity": z.capacity, "max_local_density": round(float(local.max()), 2) if n else 0.0,
+                          "full_at_s": round(float(full[0]) * Config.SIM_STEP_S, 1) if len(full) else None})
+        danger = np.argwhere(active & (res.density >= res.danger_density))          # (person, step)
+        if len(danger) > 3000:
+            danger = danger[np.linspace(0, len(danger) - 1, 3000).astype(int)]
+        return {
+            "type": "whatif", "scenario": "panic", "level": round(float(level), 2),
+            "t0": round(snap["t"], 3), "frame_idx": snap["frame_idx"],
+            "scene_version": snap["scene_version"], "step_s": Config.SIM_STEP_S, "steps": steps,
+            "ids": list(snap["ids"]), "paths": np.round(res.paths.reshape(n, -1), 2).tolist(),
+            "enter_step": [0] * n, "exit_step": res.exit_step.tolist(), "n_tracked": n,
+            "zones": zones, "summary": res.summary(),
+            "danger": [[int(k), *np.round(res.paths[i, k], 2).tolist()] for i, k in danger],
+            "compute_ms": round((time.perf_counter() - t0) * 1000, 1),
         }
 
 
@@ -2390,6 +2844,7 @@ twin_manager = ConnectionManager()           # 3D twin (/ws/twin)
 pipeline: Optional[TwinPipeline] = None
 twin_service: Optional[TwinService] = None
 app_loop: Optional[asyncio.AbstractEventLoop] = None
+STARTED_AT = time.time()
 
 app.add_middleware(
     CORSMiddleware,
@@ -2430,7 +2885,8 @@ async def ws_endpoint(ws: WebSocket):
 @app.websocket("/ws/twin")
 async def ws_twin(ws: WebSocket):
     """The 3D twin's stream: the scene (on connect and when it changes), the
-    crowd state and the 20 s forecast. Send "scene" to get the scene again."""
+    crowd state and the 20 s forecast. Send "scene" to get the scene again,
+    "whatif:0.8" for a panic what-if at that level."""
     await twin_manager.connect(ws)
     try:
         if pipeline is not None:
@@ -2440,8 +2896,18 @@ async def ws_twin(ws: WebSocket):
             if twin_service is not None and twin_service.latest_forecast is not None:
                 await ws.send_text(json.dumps(twin_service.latest_forecast))
         while True:
-            if await ws.receive_text() == "scene" and pipeline is not None:
+            msg = await ws.receive_text()
+            if msg == "scene" and pipeline is not None:
                 await ws.send_text(json.dumps(pipeline.twin_scene()))
+            elif msg.startswith("whatif:") and twin_service is not None \
+                    and pipeline is not None and pipeline.twin_snapshot is not None:
+                try:
+                    level = float(msg.split(":", 1)[1])
+                except ValueError:
+                    level = 0.8
+                wi = await asyncio.to_thread(twin_service.whatif, pipeline.twin_snapshot,
+                                             min(max(level, 0.0), 1.0))
+                await ws.send_text(json.dumps(wi))
     except WebSocketDisconnect:
         twin_manager.disconnect(ws)
 
@@ -2488,6 +2954,121 @@ async def twin_info():
     return {"scene":    pipeline.twin_scene(),
             "state":    TwinService.state(snap),
             "forecast": await asyncio.to_thread(twin_service.forecast, snap)}
+
+
+def video_files() -> List[Path]:
+    d = Path(Config.VIDEO_DIR)
+    return sorted(p for p in d.iterdir()
+                  if p.is_file() and p.suffix.lower() in Config.VIDEO_EXTS) if d.is_dir() else []
+
+
+@app.get("/api/sources")
+async def sources():
+    """The videos the live pipeline can switch to (not in replay mode)."""
+    return {
+        "switchable": isinstance(pipeline, CDTPipeline),
+        "mode":       pipeline.mode if pipeline else None,
+        "current":    pipeline.source_name if pipeline else None,
+        "sources":    [{"name": p.name, "mb": round(p.stat().st_size / 2**20, 1)}
+                       for p in video_files()],
+        "streams":    Config.ALLOW_STREAM_URLS,
+    }
+
+
+def stream_source(url):
+    """
+    A camera index or a network stream URL the switcher may open, or None.
+    Only rtsp/rtsps/http/https URLs and camera numbers — never file paths,
+    so the dashboard can't be used to open files on the server.
+    """
+    if isinstance(url, int) or (isinstance(url, str) and url.strip().isdigit()):
+        n = int(url)
+        return n if 0 <= n <= 16 else None
+    if isinstance(url, str):
+        u = url.strip()
+        if u.lower().split("://", 1)[0] in ("rtsp", "rtsps", "http", "https") and "://" in u \
+                and len(u) < 500 and not any(c in u for c in "\n\r\t "):
+            return u
+    return None
+
+
+@app.post("/api/source")
+async def set_source(body: dict = Body(...)):
+    """
+    Switch the live pipeline: {"name": "demo.mp4"} (a video from
+    /api/sources), or {"url": "rtsp://…"} / {"url": "0"} (a network stream
+    or camera; Config.ALLOW_STREAM_URLS).
+    """
+    if not isinstance(pipeline, CDTPipeline):
+        raise HTTPException(409, "Sources can't be switched in replay mode")
+    if "url" in body:
+        if not Config.ALLOW_STREAM_URLS:
+            raise HTTPException(403, "Opening cameras / stream URLs is switched off")
+        src = stream_source(body.get("url"))
+        if src is None:
+            raise HTTPException(422, "Give a camera number or an rtsp:// / http(s):// URL")
+    else:
+        match = [p for p in video_files() if p.name == body.get("name")]
+        if not match:
+            raise HTTPException(404, f"No video named {body.get('name')!r} in {Config.VIDEO_DIR}/")
+        src = match[0].as_posix()
+    try:
+        await asyncio.to_thread(pipeline.switch_source, src)
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+    return {"current": pipeline.source_name}
+
+
+@app.get("/api/health")
+async def health():
+    """For monitoring long live runs: is video arriving, how fast, how long up."""
+    if pipeline is None:
+        return {"status": "pipeline not started"}
+    p = pipeline.latest_payload or {}
+    video = getattr(pipeline, "video", None)
+    age = round(time.time() - p["timestamp"], 1) if "timestamp" in p else None
+    return {
+        "status":           "ok" if age is not None and age < 10 else "stalled",
+        "mode":             pipeline.mode,
+        "source":           pipeline.source_name,
+        "uptime_s":         round(time.time() - STARTED_AT, 1),
+        "last_update_age_s": age,
+        "fps":              p.get("fps"),
+        "latency_ms":       p.get("latency_ms"),
+        "people":           p.get("n_agents"),
+        "dense_mode":       pipeline.dense,
+        "stream_reconnects": getattr(video, "reconnects", 0),
+        "iot":              pipeline.fusion.iot.mode,
+    }
+
+
+@app.post("/api/iot")
+async def iot_counts(body: dict = Body(...), x_iot_token: Optional[str] = Header(None)):
+    """
+    Real gate-counter counts (Stream 2): {"entry": 3, "exit": 1}. The first
+    call switches the fusion from simulated to real gates. Needs header
+    X-IoT-Token when Config.IOT_TOKEN is set.
+    """
+    if Config.IOT_TOKEN and x_iot_token != Config.IOT_TOKEN:
+        raise HTTPException(401, "Missing or wrong X-IoT-Token")
+    if pipeline is None:
+        raise HTTPException(503, "Pipeline not started")
+    try:
+        entry, exit_ = parse_counts(body)
+    except (ValueError, TypeError, AttributeError) as e:
+        raise HTTPException(422, str(e))
+    iot = pipeline.fusion.iot
+    iot.push_real(entry, exit_)
+    return {"mode": iot.mode, "net_count": iot.net_count}
+
+
+@app.get("/api/twin/whatif")
+async def twin_whatif(panic: float = 0.8):
+    """Panic what-if from the current crowd (level 0–1): paths, evacuation, crush risk."""
+    if pipeline is None or pipeline.twin_snapshot is None or twin_service is None:
+        return {"status": "pipeline not started"}
+    return await asyncio.to_thread(twin_service.whatif, pipeline.twin_snapshot,
+                                   min(max(panic, 0.0), 1.0))
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2541,6 +3122,15 @@ if __name__ == "__main__":
                         help="Frame size of the replayed tracks (default: seqinfo.ini or the logs)")
     parser.add_argument("--fps", type=float,
                         help="Frame rate of the replayed tracks")
+    parser.add_argument("--body", metavar="WEIGHTS", help=f"body detector (default {Config.YOLO_MODEL}; "
+                                                          f".pt, .engine or .onnx)")
+    parser.add_argument("--head", metavar="WEIGHTS", help=f"head detector (default {Config.HBOX_MODEL})")
+    parser.add_argument("--dense-model", metavar="WEIGHTS",
+                        help=f"dense-crowd point model (default {Config.DENSE_MODEL}, if present)")
+    parser.add_argument("--mqtt", metavar="HOST[:PORT]",
+                        help="MQTT broker with gate-counter messages (see iot.py)")
+    parser.add_argument("--mqtt-topic", default="cdt/gates/#")
+    parser.add_argument("--iot-token", help="require this X-IoT-Token on POST /api/iot")
     args = parser.parse_args()
 
     Config.DEVICE           = args.device
@@ -2548,6 +3138,10 @@ if __name__ == "__main__":
     Config.CAMERA_HFOV_DEG  = args.hfov
     Config.SCENE_WIDTH_M    = args.scene_width_m
     Config.SCENE_HEIGHT_M   = args.scene_height_m
+    Config.IOT_TOKEN        = args.iot_token or Config.IOT_TOKEN
+    Config.YOLO_MODEL       = args.body or Config.YOLO_MODEL
+    Config.HBOX_MODEL       = args.head or Config.HBOX_MODEL
+    Config.DENSE_MODEL      = args.dense_model or Config.DENSE_MODEL
 
     if args.replay:
         size = None
@@ -2559,6 +3153,11 @@ if __name__ == "__main__":
     else:
         src = int(args.source) if args.source.isdigit() else args.source
         pipeline = CDTPipeline(src)
+
+    if args.mqtt:
+        # Look the fusion up per message: switching source gives the pipeline a new one
+        MQTTGates(args.mqtt, args.mqtt_topic,
+                  lambda e, x: pipeline.fusion.iot.push_real(e, x)).start()
 
     print("=" * 60)
     print("  Crowd Digital Twin — Team 28 | PES University")

@@ -20,3 +20,5 @@ weights/
 # Generated results
 results/
 results.csv
+# Local handoff notes (not published)
+handoff.md

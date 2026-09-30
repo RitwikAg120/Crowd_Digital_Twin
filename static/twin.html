@@ -43,8 +43,8 @@ th:first-child,td:first-child{text-align:left}
 @media (max-width:760px){#side{display:none}#timeline{right:12px}}
 </style>
 <script type="importmap">
-{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+{"imports":{"three":"/static/vendor/three/three.module.js",
+            "three/addons/":"/static/vendor/three/addons/"}}
 </script>
 </head>
 <body>
@@ -54,7 +54,7 @@ th:first-child,td:first-child{text-align:left}
 <div id="top" class="panel">
   <div>
     <h1>Crowd Digital Twin · 3D</h1>
-    <div class="sub">20 s forecast (social force model) · environment set up from the camera calibration</div>
+    <div class="sub">20 s forecast (anticipatory social force, learned lanes and arrivals, self-calibrating) · environment set up from the camera calibration</div>
   </div>
   <span class="pill" id="conn">connecting…</span>
   <span class="pill" id="trig">forecast trigger —</span>
@@ -62,6 +62,7 @@ th:first-child,td:first-child{text-align:left}
   <button class="btn" id="v-cctv" title="View from the real camera (C)">CCTV view</button>
   <button class="btn" id="v-orbit" title="Three-quarter view (O)">3/4</button>
   <button class="btn" id="v-top" title="Top-down (T)">Top</button>
+  <button class="btn" id="whatif" title="What if this crowd panicked now? Escape-panic scenario, 40 s (P)">Panic what-if</button>
   <button class="btn on" id="c-speed" title="Colour people by speed">Speed</button>
   <button class="btn" id="c-risk" title="Colour people by their zone's risk">Zone risk</button>
   <a class="btn" href="/" target="_blank">Dashboard ↗</a>
@@ -74,15 +75,27 @@ th:first-child,td:first-child{text-align:left}
     <tbody id="zones"></tbody>
   </table>
   <div id="warnings"></div>
+  <div id="wi-box" style="display:none">
+    <h2>Panic what-if</h2>
+    <div class="kv"><span>Panic level</span><span><input type="range" id="wi-level" min="0" max="1" step="0.1" value="0.8" style="width:90px;vertical-align:middle"> <span id="wi-lv">0.8</span></span></div>
+    <div class="kv"><span>Half out of view</span><span id="wi-half">—</span></div>
+    <div class="kv"><span>90% out of view</span><span id="wi-90">—</span></div>
+    <div class="kv"><span>Peak density</span><span id="wi-peak">—</span></div>
+    <div class="kv"><span>Crush risk (&gt;5 p/m²)</span><span id="wi-danger">—</span></div>
+    <div style="font-size:11px;color:var(--text3);margin-top:4px">A scenario, not a prediction: everyone flees to the nearest edge of the view, following the crowd (Helbing, Farkas &amp; Vicsek 2000); exits pass at most 1.3 people/m/s.</div>
+  </div>
   <h2>Twin</h2>
   <div class="kv"><span>People</span><span id="k-people">—</span></div>
   <div class="kv"><span>Scene risk</span><span id="k-risk">—</span></div>
   <div class="kv"><span>Ground</span><span id="k-ground">—</span></div>
   <div class="kv"><span>Walkable floor</span><span id="k-floor">—</span></div>
   <div class="kv"><span>Forecast</span><span id="k-fc">—</span></div>
+  <div class="kv" title="People leaving through the view's edges / arriving, over the forecast"><span>Leaving / arriving</span><span id="k-flow">—</span></div>
+  <div class="kv" title="The twin checks its earlier forecasts against what then happened: mean error in people per zone, against assuming nothing changes"><span>Skill at +<span id="k-sk-h">20</span> s</span><span id="k-skill">learning…</span></div>
   <h2>Legend</h2>
   <div class="legend"><span class="sw" style="background:#8a94a6"></span>Wall: the floor ends (learned from people's feet)</div>
   <div class="legend"><span class="sw" style="background:#4cc3ff;opacity:.6"></span>Edge of the camera's view</div>
+  <div class="legend"><span class="sw" style="background:#6b7890"></span>Obstacle: floor nobody walks on (learned)</div>
   <div class="legend"><span class="sw" style="background:repeating-linear-gradient(90deg,#5d6d8b 0 4px,transparent 4px 7px)"></span>Too far away to see</div>
   <div class="legend"><span class="sw" style="background:linear-gradient(90deg,#3fa9f5,#2ecc71,#f5c542,#ff5a4f)"></span>Speed 0 → 2.5 m/s</div>
   <div class="legend"><span class="sw" style="background:#9fe3ff;opacity:.55"></span>Forecast position and path</div>
@@ -232,14 +245,17 @@ function addCameraMarker(c) {
   lens.rotation.x = Math.PI / 2;                    // opens towards −z, the way the camera looks
   lens.position.z = -0.65;
   g.add(body, lens);
-  g.position.copy(P(0, 0, c.height_m));
+  const cx = c.x || 0, cy = c.y || 0;
+  g.position.copy(P(cx, cy, c.height_m));
+  g.rotation.order = 'YXZ';
+  g.rotation.y = -deg(c.yaw_deg || 0);              // heading on the ground (0 = along +Y)
   g.rotation.x = -deg(c.pitch_deg);                 // tilted down
   env.add(g);
-  const pole = new THREE.Line(new THREE.BufferGeometry().setFromPoints([P(0, 0, 0), P(0, 0, c.height_m)]),
+  const pole = new THREE.Line(new THREE.BufferGeometry().setFromPoints([P(cx, cy, 0), P(cx, cy, c.height_m)]),
                               new THREE.LineDashedMaterial({ color: 0x8b9bb8, dashSize: 0.3, gapSize: 0.2 }));
   pole.computeLineDistances();
   env.add(pole);
-  env.add(textSprite('camera', [0, 0], c.height_m + 0.7, 1.1, '#dde6f4'));
+  env.add(textSprite('camera', [cx, cy], c.height_m + 0.7, 1.1, '#dde6f4'));
 }
 
 function buildEnvironment(s) {
@@ -266,6 +282,13 @@ function buildEnvironment(s) {
     return fill;
   });
   for (const e of s.edges) addEdge(e);
+  if (s.obstacles && s.obstacles.length) {               // learned: floor nobody ever walks on
+    const c = s.obstacle_cell || 1;
+    const blocks = new THREE.InstancedMesh(new THREE.BoxGeometry(c * 0.9, 1.1, c * 0.9),
+      new THREE.MeshLambertMaterial({ color: 0x6b7890, flatShading: true }), s.obstacles.length);
+    s.obstacles.forEach(([x, y], i) => blocks.setMatrixAt(i, m4.compose(P(x, y, 0.55), q.identity(), one)));
+    env.add(blocks);
+  }
   if (s.camera) addCameraMarker(s.camera);
 
   const cal = s.calibration || {};
@@ -291,8 +314,10 @@ function setView(kind) {
     // Where the real camera is, looking where it looks
     const c = sceneData.camera, [fw, fh] = sceneData.frame_size || [16, 9];
     camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(deg(c.hfov_deg) / 2) * fh / fw));
-    camera.position.copy(P(0, 0, c.height_m));
-    controls.target.copy(P(0, c.height_m / Math.max(Math.tan(deg(c.pitch_deg)), 0.05), 0));
+    const cx0 = c.x || 0, cy0 = c.y || 0, yaw = deg(c.yaw_deg || 0);
+    const reach = c.height_m / Math.max(Math.tan(deg(c.pitch_deg)), 0.05);
+    camera.position.copy(P(cx0, cy0, c.height_m));
+    controls.target.copy(P(cx0 + Math.sin(yaw) * reach, cy0 + Math.cos(yaw) * reach, 0));
   } else if (kind === 'top') {
     camera.position.copy(P(cx, cy - 0.01, ext * 2.4));
     controls.target.copy(P(cx, cy, 0));
@@ -331,6 +356,12 @@ const arrows = instanced(arrowGeo, new THREE.MeshBasicMaterial({
 const ghostMat = new THREE.MeshLambertMaterial({ color: 0x9fe3ff, flatShading: true, transparent: true,
                                                  opacity: 0.4, depthWrite: false });
 const ghost = { body: instanced(bodyGeo, ghostMat), head: instanced(headGeo, ghostMat) };
+// Panic what-if: crush-risk spots (local density > 5 p/m²) at the current time
+const dangerMesh = instanced(new THREE.CircleGeometry(0.45, 12).rotateX(-Math.PI / 2).translate(0, 0.06, 0),
+  new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.55, depthWrite: false }));
+let whatif = null, showWhatif = false;
+// In what-if mode show only the scenario (nothing while it is computing), never the forecast in red
+function shown() { return showWhatif ? whatif : forecast; }
 
 const STEPS_MAX = 64;
 const trailPos = new Float32Array(MAX * STEPS_MAX * 6);
@@ -414,22 +445,30 @@ function drawLive(dt) {
 }
 
 function drawForecast() {
+  const forecast = shown();
+  ghostMat.color.set(showWhatif ? 0xff7a6e : 0x9fe3ff);
+  trails.material.color.set(showWhatif ? 0xff7a6e : 0x9fe3ff);
+  dangerMesh.count = 0;
   const show = !!forecast && tNow > 0.001 && sceneData && forecast.scene_version === sceneData.version;
   ghost.body.visible = ghost.head.visible = trails.visible = show;
   if (!show) return;
   const steps = forecast.steps, f = Math.min(tNow / forecast.step_s, steps);
   const k0 = Math.floor(f), k1 = Math.min(k0 + 1, steps), fr = f - k0;
   let i = 0, v = 0;
-  for (const path of forecast.paths) {
+  const enter = forecast.enter_step || [], exit = forecast.exit_step || [];
+  for (let p = 0; p < forecast.paths.length; p++) {
     if (i >= MAX) break;
+    const path = forecast.paths[p];
+    // Not here yet (an arrival) or already walked out of the view
+    if ((enter[p] || 0) > f || (exit[p] >= 0 && exit[p] <= f)) continue;
     const x0 = path[2 * k0], y0 = path[2 * k0 + 1], x1 = path[2 * k1], y1 = path[2 * k1 + 1];
     const x = x0 + (x1 - x0) * fr, y = y0 + (y1 - y0) * fr;
     q.setFromAxisAngle(yAxis, Math.atan2(y1 - y0, x1 - x0));
     m4.compose(tmpV.set(x, 0, -y), q, one);
     ghost.body.setMatrixAt(i, m4);
     ghost.head.setMatrixAt(i, m4);
-    // Path walked so far, from now to the current forecast time
-    for (let s = 0; s <= k0 && v + 6 <= trailPos.length; s++) {
+    // Path walked so far, from when they are in the scene to the current forecast time
+    for (let s = enter[p] || 0; s <= k0 && v + 6 <= trailPos.length; s++) {
       trailPos[v]     = path[2 * s];
       trailPos[v + 1] = 0.05;
       trailPos[v + 2] = -path[2 * s + 1];
@@ -442,17 +481,29 @@ function drawForecast() {
   }
   ghost.body.count = ghost.head.count = i;
   ghost.body.instanceMatrix.needsUpdate = ghost.head.instanceMatrix.needsUpdate = true;
+  if (showWhatif && forecast.danger) {                 // crush-risk spots at this moment
+    const kk = Math.round(f);
+    let d = 0;
+    for (const [k, x, y] of forecast.danger) {
+      if (k !== kk || d >= MAX) continue;
+      dangerMesh.setMatrixAt(d++, m4.compose(tmpV.set(x, 0, -y), q.identity(), one));
+    }
+    dangerMesh.count = d;
+    dangerMesh.instanceMatrix.needsUpdate = true;
+  }
   trailGeo.setDrawRange(0, v / 3);
   trailGeo.attributes.position.needsUpdate = true;
 }
 
 function forecastStep() {
+  const forecast = shown();
   return forecast && tNow > 0.001 && sceneData && forecast.scene_version === sceneData.version
     ? Math.min(Math.round(tNow / forecast.step_s), forecast.steps) : null;
 }
 
 function colorZones() {
   if (!sceneData) return;
+  const forecast = shown();
   const k = forecastStep();
   sceneData.zones.forEach((z, i) => {
     const fill = zoneFills[i];
@@ -471,13 +522,24 @@ function colorZones() {
 
 function updatePanel() {
   if (!sceneData) return;
+  const forecast = shown();
+  const ws_ = showWhatif && whatif ? whatif.summary : null;
+  document.getElementById('wi-box').style.display = showWhatif ? 'block' : 'none';
+  if (ws_) {
+    setText('wi-half', ws_.half_out_s != null ? `${ws_.half_out_s} s` : '> 40 s');
+    setText('wi-90', ws_.ninety_out_s != null ? `${ws_.ninety_out_s} s` : '> 40 s');
+    setText('wi-peak', `${ws_.max_density} p/m² at +${ws_.max_density_s} s`);
+    const d = document.getElementById('wi-danger');
+    d.textContent = ws_.danger_first_s != null ? `from +${ws_.danger_first_s} s, ${ws_.people_in_danger} people` : 'none';
+    d.style.color = ws_.danger_first_s != null ? 'var(--hi)' : 'var(--low)';
+  } else if (showWhatif) setText('wi-half', 'computing…');
   const k = forecastStep();
   const kk = k ?? 0;
   setText('th-t', k ? `+${Math.round(k * forecast.step_s)} s` : 'Now');
   const ok = forecast && forecast.scene_version === sceneData.version;
   document.getElementById('zones').innerHTML = sceneData.zones.map((z, i) => {
     const fz = ok ? forecast.zones[i] : null;
-    const at = fz ? fz.counts[kk] : '—';
+    const at = fz ? Math.round(fz.counts[kk]) : '—';
     const over = fz && fz.counts[kk] >= z.capacity;
     const full = fz ? fz.full_at_s : null;
     return `<tr><td>${z.name.replace('Zone_', '')}</td><td>${state?.zones?.[i]?.count ?? '—'}</td>` +
@@ -489,6 +551,21 @@ function updatePanel() {
     .map(z => `<div class="warn">⚠ ${z.name.replace('_', ' ')} ${z.full_at_s === 0 ? 'is at' : 'reaches'} capacity${z.full_at_s ? ' in ' + z.full_at_s + ' s' : ''}</div>`)
     .join('') : '';
   setText('k-fc', forecast ? `${forecast.compute_ms} ms · ${Math.max(0, Date.now() / 1000 - forecast.t0).toFixed(1)} s ago` : '—');
+  if (forecast) {
+    const ex = forecast.exit_step || [], n = forecast.n_tracked ?? forecast.paths.length;
+    setText('k-flow', `${ex.filter(s => s >= 0).length} / ${forecast.paths.length - n}`);
+    // Skill at the furthest horizon the twin has scored so far
+    const sk = forecast.skill;
+    let h = -1;
+    if (sk) for (let s = sk.mae_twin.length - 1; s > 0; s--) if (sk.mae_twin[s] != null) { h = s; break; }
+    if (h > 0) {
+      setText('k-sk-h', Math.round(h * sk.step_s));
+      const better = sk.mae_twin[h] <= sk.mae_no_change[h];
+      const el = document.getElementById('k-skill');
+      el.textContent = `±${sk.mae_twin[h].toFixed(1)} vs ±${sk.mae_no_change[h].toFixed(1)} no change`;
+      el.style.color = better ? 'var(--low)' : 'var(--med)';
+    }
+  }
 }
 
 // ── Timeline ─────────────────────────────────────────────────────────────
@@ -519,6 +596,22 @@ function setColorMode(m) {
   document.getElementById('c-risk').classList.toggle('on', m === 'risk');
 }
 document.getElementById('c-speed').addEventListener('click', () => setColorMode('speed'));
+// Panic what-if: ask the server to run the scenario from the crowd now, then play it
+function askWhatif() {
+  const lv = +document.getElementById('wi-level').value;
+  setText('wi-lv', lv.toFixed(1));
+  whatif = null;
+  if (ws && ws.readyState === 1) ws.send(`whatif:${lv}`);
+}
+function setWhatif(on) {
+  showWhatif = on;
+  document.getElementById('whatif').classList.toggle('on', on);
+  if (on) { askWhatif(); setTime(0); setPlaying(true); }
+  else { horizon = sceneData?.horizon_s || 20; slider.max = horizon; setTime(0); setPlaying(false); }
+  updatePanel();
+}
+document.getElementById('whatif').addEventListener('click', () => setWhatif(!showWhatif));
+document.getElementById('wi-level').addEventListener('change', () => { if (showWhatif) askWhatif(); });
 document.getElementById('c-risk').addEventListener('click', () => setColorMode('risk'));
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' && e.key !== ' ') return;
@@ -526,6 +619,7 @@ addEventListener('keydown', e => {
   else if (e.key === 'c') setView('cctv');
   else if (e.key === 't') setView('top');
   else if (e.key === 'o') setView('orbit');
+  else if (e.key === 'p') setWhatif(!showWhatif);
 });
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -545,7 +639,10 @@ function connect() {
   };
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
-    if (m.type === 'scene') buildEnvironment(m);
+    if (m.type === 'scene') {
+      buildEnvironment(m);
+      if (showWhatif) askWhatif();                  // a what-if belongs to the scene it was run on
+    }
     else if (m.type === 'state') {
       if ((!sceneData || m.scene_version !== sceneData.version) && Date.now() - lastSceneAsk > 1000) {
         lastSceneAsk = Date.now();
@@ -553,6 +650,10 @@ function connect() {
       }
       onState(m);
     } else if (m.type === 'forecast') forecast = m;
+    else if (m.type === 'whatif') {
+      whatif = m;
+      if (showWhatif) { horizon = m.steps * m.step_s; slider.max = horizon; }
+    }
   };
 }
 connect();

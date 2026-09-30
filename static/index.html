@@ -4,8 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Crowd Digital Twin — Event Safety Command Centre</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -17,8 +15,8 @@
   --risk-low:#137333;--risk-low-bg:#e6f4ea;
   --risk-med:#7a4a00;--risk-med-bg:#fef3e2;
   --risk-hi:#a50e0e;--risk-hi-bg:#fce8e6;
-  --mono:'IBM Plex Mono',monospace;
-  --sans:'IBM Plex Sans',system-ui,sans-serif;
+  --mono:ui-monospace,'Cascadia Mono',Consolas,'SF Mono',Menlo,monospace;
+  --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
 }
 html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;overflow:hidden}
 
@@ -105,6 +103,17 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
 .scen-btn{font-size:10px;padding:3px 9px;border-radius:3px;border:1px solid var(--border);background:var(--card);color:var(--text2);cursor:pointer;font-weight:500;transition:all .15s;font-family:var(--mono)}
 .scen-btn:hover{background:var(--bg2)}
 .scen-btn.active{background:var(--navy);color:#fff;border-color:var(--navy)}
+.scen-btn:disabled{opacity:.5;cursor:wait}
+.nfr-badge{font-size:9px;background:var(--bg2);color:var(--text2);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)}
+.nfr-badge.ok{background:var(--risk-low-bg);color:var(--risk-low)}
+.nfr-badge.bad{background:var(--risk-hi-bg);color:var(--risk-hi)}
+.zone-cell.sel{box-shadow:inset 0 -2px 0 var(--navy)}
+
+/* ── Zone detail panel ── */
+.zone-panel{position:absolute;left:8px;bottom:8px;width:230px;background:var(--card);border:1px solid var(--border2);border-radius:4px;padding:8px 10px;box-shadow:0 4px 14px rgba(0,0,0,.3)}
+.zp-head{display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:12px;margin-bottom:5px}
+.zp-close{border:none;background:none;font-size:16px;line-height:1;cursor:pointer;color:var(--text2)}
+.zp-link{display:block;margin-top:6px;font-size:10px;color:var(--text2)}
 
 /* ── Right sidebar ── */
 .alert-list{flex:1;overflow-y:auto;min-height:0}
@@ -155,23 +164,23 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   </div>
   <div>
     <div class="header-title">Crowd Digital Twin — Event Safety Command Centre</div>
-    <div class="header-sub">Ministry of Home Affairs · Disaster Management Division · NDMA Aligned</div>
+    <div class="header-sub">Team 28 · PES University · Capstone project</div>
   </div>
   <div class="hsp"></div>
   <div class="tricolor"><div class="tc-s"></div><div class="tc-w"></div><div class="tc-g"></div></div>
   <div class="ws-pill ws-off" id="ws-pill">connecting...</div>
-  <div class="live-badge"><div class="live-dot"></div>LIVE</div>
+  <div class="live-badge" id="mode-badge"><div class="live-dot"></div><span id="mode-text">LIVE</span></div>
 </div>
 
 <!-- SUB-HEADER -->
 <div class="subheader">
-  <span>Site</span><span class="sh-v" id="sh-site">MOT17-09 · Mall</span>
+  <span>Site</span><span class="sh-v" id="sh-site">—</span>
   <span class="sh-sep">|</span>
   <span>Frame</span><span class="sh-v" id="sh-frame">#—</span>
   <span class="sh-sep">|</span>
   <span>Model</span><span class="sh-v" id="sh-model">YOLO26s + ByteTrack</span>
   <span class="sh-sep">|</span>
-  <span>Datasets</span><span class="sh-v">CrowdHuman · MOT17 · ETH/UCY</span>
+  <span>Datasets</span><span class="sh-v">CrowdHuman · MOT17</span>
   <div class="shsp"></div>
   <span class="sh-v" id="sh-time">—</span>
 </div>
@@ -207,9 +216,9 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
     <div class="m-val" style="font-size:15px;margin-top:4px" id="m-sim">—</div>
     <div class="m-sub" id="m-simreason">—</div>
     <div style="display:flex;gap:4px;margin-top:6px" id="nfr-badges">
-      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">FPS</span>
-      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">Latency</span>
-      <span style="font-size:9px;background:var(--risk-low-bg);color:var(--risk-low);padding:2px 6px;border-radius:2px;font-weight:600;font-family:var(--mono)">Edge AI</span>
+      <span class="nfr-badge" id="bd-fps" title="FPS ≥ 10">FPS</span>
+      <span class="nfr-badge" id="bd-lat" title="Latency &lt; 2 s">Latency</span>
+      <span class="nfr-badge" id="bd-dev" title="Device running the detectors">—</span>
     </div>
   </div>
 </div>
@@ -235,26 +244,24 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   <div class="kv-row"><span class="kv-k">Horizon</span><span class="kv-v">20 s</span></div>
   <div class="kv-row"><span class="kv-k">Zones</span><span class="kv-v">2×3 grid</span></div>
   <div class="kv-row"><span class="kv-k">Ground</span><span class="kv-v" id="kv-ground">—</span></div>
+  <div class="kv-row" title="Dense mode: heads at high resolution (and head points, if the dense model is installed) for crowds where bodies are hidden"><span class="kv-k">Dense mode</span><span class="kv-v" id="kv-dense">—</span></div>
+  <div class="kv-row" title="People found by their body box / only their head / a head point"><span class="kv-k">Found by</span><span class="kv-v" id="kv-found">—</span></div>
 
   <div class="sec-title">NFR checks</div>
   <div class="nfr-row"><span class="nfr-k">FPS ≥ 10</span><span class="nfr-pass" id="nfr-fps">—</span></div>
   <div class="nfr-row"><span class="nfr-k">Latency &lt; 2s</span><span class="nfr-pass" id="nfr-lat">—</span></div>
-  <div class="nfr-row"><span class="nfr-k">Fusion active</span><span class="nfr-pass">Pass</span></div>
+  <div class="nfr-row"><span class="nfr-k">Fusion κ ≥ 0.70</span><span class="nfr-pass" id="nfr-fusion">—</span></div>
   <div class="nfr-row"><span class="nfr-k">IoT gates</span><span class="nfr-pass" id="nfr-iot">—</span></div>
-  <div class="nfr-row"><span class="nfr-k">ETH/UCY prior</span><span class="nfr-pass" id="nfr-prior">—</span></div>
 
   <div class="sec-title">Datasets</div>
   <div style="padding:8px 14px;display:flex;flex-wrap:wrap;gap:3px">
     <span class="ds-tag">CrowdHuman</span>
     <span class="ds-tag">MOT17</span>
-    <span class="ds-tag">ETH/UCY</span>
-    <span class="ds-tag">UCF-CC-50</span>
   </div>
 
   <div class="sec-title">Fusion weights</div>
   <div class="kv-row"><span class="kv-k">Video (Stream 1)</span><span class="kv-v">0.70</span></div>
   <div class="kv-row"><span class="kv-k">IoT (Stream 2)</span><span class="kv-v">0.30</span></div>
-  <div class="kv-row"><span class="kv-k">Mobility prior</span><span class="kv-v">modifier</span></div>
   <div class="kv-row"><span class="kv-k">Discrepancy δ</span><span class="kv-v">5 persons</span></div>
   <div class="kv-row"><span class="kv-k">IoT entry</span><span class="kv-v" id="kv-entry">—</span></div>
   <div class="kv-row"><span class="kv-k">IoT exit</span><span class="kv-v" id="kv-exit">—</span></div>
@@ -263,13 +270,14 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
 
 <!-- MAIN CONTENT -->
 <div class="main">
-  <div class="scen-bar" id="scen-bar">
-    <span style="font-size:10px;color:var(--text3);font-family:var(--mono);flex-shrink:0">SCENARIO</span>
-    <button class="scen-btn active" onclick="setScenario(0,this)">Mall</button>
-    <button class="scen-btn" onclick="setScenario(1,this)">Concert surge</button>
-    <button class="scen-btn" onclick="setScenario(2,this)">Temple gathering</button>
-    <button class="scen-btn" onclick="setScenario(3,this)">Kumbh Mela</button>
-    <button class="scen-btn" onclick="setScenario(4,this)">Evacuation</button>
+  <div class="scen-bar" id="src-bar" style="display:none">
+    <span style="font-size:10px;color:var(--text3);font-family:var(--mono);flex-shrink:0">SOURCE</span>
+    <span id="src-btns" style="display:contents"></span>
+    <form id="src-url-form" style="display:none;gap:4px;align-items:center" onsubmit="event.preventDefault();switchSource(null,document.getElementById('src-url').value)">
+      <input id="src-url" class="scen-btn" style="width:170px;cursor:text" placeholder="rtsp://… or camera 0" aria-label="Stream URL or camera number">
+      <button class="scen-btn" type="submit">Open</button>
+    </form>
+    <span id="src-msg" style="font-size:10px;color:var(--text3);font-family:var(--mono)"></span>
   </div>
 
   <div class="cam-wrap" id="cam-wrap">
@@ -286,6 +294,11 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
     </div>
     <div class="cam-overlay-label" id="cam-label">LIVE · YOLO26s + ByteTrack + Data Fusion</div>
     <div class="cam-fps-badge" id="cam-fps">— FPS</div>
+    <div class="zone-panel" id="zone-panel" hidden>
+      <div class="zp-head"><span id="zp-title">—</span><button class="zp-close" onclick="closeZone()" aria-label="Close">×</button></div>
+      <div id="zp-body"></div>
+      <a href="/twin" target="_blank" class="zp-link">Forecast in the 3D twin ↗</a>
+    </div>
   </div>
 
   <div class="zone-grid" id="zone-grid"></div>
@@ -321,7 +334,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
 <!-- TICKER -->
 <div class="ticker">
   <span class="ticker-dot" id="ticker-dot" style="background:var(--saffron)"></span>
-  <span class="ticker-label">ALERT</span>
+  <span class="ticker-label" id="ticker-label">STATUS</span>
   <span class="ticker-text" id="ticker-text">Crowd Digital Twin · Team 28 · PES University · Capstone Phase 2</span>
   <span style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.3)" id="ticker-count">0 alerts</span>
 </div>
@@ -330,7 +343,6 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
 <div class="footer">
   <div class="footer-left">Team 28 · PES University · UE23CS320A · Guide: Dr. Richa Sharma · 2025–26</div>
   <div class="footer-tags">
-    <div class="footer-tag">NDMA Aligned</div>
     <div class="footer-tag">Fruin LOS</div>
     <div class="footer-tag">Edge AI</div>
     <div class="footer-tag">Multi-Modal Fusion</div>
@@ -346,15 +358,6 @@ const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.h
 const ZONES  = ['Zone_A','Zone_B','Zone_C','Zone_D','Zone_E','Zone_F'];
 const CAPS   = [22,18,20,16,18,14];
 
-const SCENARIOS = [
-  {name:'Mall (demo)',     riskBase:0.52, site:'MOT17-09 · Mall CCTV', counts:[16,7,3,8,5,5]},
-  {name:'Concert surge',   riskBase:0.72, site:'Concert venue · Gate B surge', counts:[20,16,12,14,15,10]},
-  {name:'Temple gathering',riskBase:0.80, site:'Temple entrance · Aarti hour', counts:[21,17,18,15,17,13]},
-  {name:'Kumbh Mela',      riskBase:0.91, site:'Prayagraj Ghat · Mauni Amavasya', counts:[22,18,20,16,18,14]},
-  {name:'Evacuation',      riskBase:0.44, site:'Emergency evacuation drill', counts:[22,6,3,2,2,1]},
-];
-
-let scIdx    = 0;
 let agBuf    = [];
 let spBuf    = [];
 let prevN    = 0;
@@ -362,16 +365,10 @@ let alertHistory = [];
 let frameN   = 0;
 let ws, reconnTimer;
 let zoneGrid_built = false;
-
-const TICKERS = [
-  'Zone A: HIGH density detected. Crowd control units advised.',
-  'Simulation active — GROWING trend. +20s prediction: scene count increases.',
-  'Data fusion: IoT stream agrees with video within δ=5. Confidence HIGH.',
-  'Edge AI pipeline: YOLO26s body + head detectors · ByteTrack · 3-stream fusion · 10 Hz WebSocket.',
-  'Fruin Level-of-Service: Zone A approaching Level E (>3 persons/m²).',
-  'ETH/UCY mobility priors active. Zone confidence calibrated.',
-];
-let tIdx = 0;
+let lastZones = {};
+let selZone   = null;
+let curSource = null;
+let switching = false;
 
 function riskColor(rl){return rl==='HIGH'?'var(--risk-hi)':rl==='MEDIUM'?'var(--risk-med)':'var(--risk-low)'}
 function riskBg(rl){return rl==='HIGH'?'var(--risk-hi-bg)':rl==='MEDIUM'?'var(--risk-med-bg)':'var(--risk-low-bg)'}
@@ -413,11 +410,7 @@ function buildZoneGrid(zones){
         <div class="zc-count" id="zcc-${name}">—</div>
         <div class="zc-bar"><div class="zc-fill" id="zcf-${name}" style="width:0%"></div></div>
         <div class="zc-risk" id="zcr-${name}">—</div>`;
-      cell.onclick=()=>{
-        const z=zones[name]||{};
-        const los=(z.density||0).toFixed(2);
-        alert(`${name.replace('_',' ')}\nCount: ${z.count||0} / ${z.capacity||'?'}\nRisk: ${z.risk||'—'}\nDensity: ${los} p/m² over ${z.area_m2||'?'} m²\nFlow: (${z.flow_x||0}, ${z.flow_y||0}) m/s\nForecast: open the 3D twin (/twin)`);
-      };
+      cell.onclick=()=>openZone(name);
       g.appendChild(cell);
     });
     zoneGrid_built=true;
@@ -453,14 +446,85 @@ function buildAlerts(newAlerts){
   });
 }
 
-let scActive = false;
+// ── Zone detail panel ──
+function openZone(name){
+  selZone=selZone===name?null:name;
+  renderZone();
+}
+function closeZone(){selZone=null;renderZone()}
+function renderZone(){
+  const p=document.getElementById('zone-panel');if(!p)return;
+  document.querySelectorAll('.zone-cell').forEach(c=>c.classList.toggle('sel',c.id==='zc-'+selZone));
+  if(!selZone){p.hidden=true;return}
+  const z=lastZones[selZone]||{};
+  const row=(k,v)=>`<div class="fp-row"><span class="fp-k">${k}</span><span class="fp-v">${v}</span></div>`;
+  setText('zp-title',selZone.replace('_',' '));
+  document.getElementById('zp-body').innerHTML=
+    row('Count',`${z.count??0} / ${z.capacity??'?'}`)+
+    row('Risk',`<span style="color:${riskColor(z.risk)}">${z.risk||'—'}</span>`)+
+    row('Density',`${(z.density||0).toFixed(2)} p/m²`)+
+    row('Area',`${z.area_m2??'?'} m²`)+
+    row('Flow',`${z.flow_x||0}, ${z.flow_y||0} m/s`);
+  p.hidden=false;
+}
 
-function setScenario(i, el){
-  scIdx=i;
-  document.querySelectorAll('.scen-btn').forEach(b=>b.classList.remove('active'));
-  el.classList.add('active');
-  setText('sh-site', SCENARIOS[i].site);
-  scActive=true;
+// ── Source switcher (live mode only) ──
+async function loadSources(){
+  try{
+    const r=await fetch('/api/sources');const s=await r.json();
+    const bar=document.getElementById('src-bar');
+    if(!s.switchable){bar.style.display='none';return}
+    const box=document.getElementById('src-btns');box.innerHTML='';
+    s.sources.forEach(v=>{
+      const b=document.createElement('button');
+      b.className='scen-btn';b.textContent=v.name;b.dataset.name=v.name;
+      b.title=`${v.mb} MB`;b.onclick=()=>switchSource(v.name);
+      box.appendChild(b);
+    });
+    if(!s.sources.length)setText('src-msg','no videos in videos/');
+    document.getElementById('src-url-form').style.display=s.streams?'flex':'none';
+    bar.style.display='flex';
+    markSource(s.current);
+  }catch(e){console.warn(e)}
+}
+function markSource(name){
+  curSource=name;
+  document.querySelectorAll('#src-btns .scen-btn').forEach(b=>b.classList.toggle('active',b.dataset.name===name));
+}
+async function switchSource(name,url){
+  url=(url||'').trim();
+  if(switching||(!url&&name===curSource)||(!name&&!url))return;
+  switching=true;
+  const btns=document.querySelectorAll('#src-btns .scen-btn');
+  btns.forEach(b=>b.disabled=true);
+  setText('src-msg',url?'opening stream…':'switching…');
+  try{
+    const r=await fetch('/api/source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(url?{url}:{name})});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.detail||r.statusText);
+    markSource(j.current);
+    agBuf=[];spBuf=[];alertHistory=[];buildAlerts([]);
+    setText('src-msg','recalibrating from people’s heights…');
+    setTimeout(()=>{if(!switching)setText('src-msg','')},8000);
+  }catch(e){setText('src-msg','switch failed: '+e.message)}
+  switching=false;
+  btns.forEach(b=>b.disabled=false);
+}
+
+function statusLine(d,rl,tr){
+  const zs=Object.entries(d.zones||{});
+  const busiest=zs.sort((a,b)=>(b[1].count/(b[1].capacity||1))-(a[1].count/(a[1].capacity||1)))[0];
+  const parts=[`${d.n_agents} tracked`,`risk ${rl} ${(d.risk_score||0).toFixed(2)}`,`trend ${tr}`];
+  if(busiest)parts.push(`busiest ${busiest[0].replace('_',' ')} ${busiest[1].count}/${busiest[1].capacity}`);
+  parts.push(`fusion κ ${(d.fusion?.confidence??0).toFixed(2)}`);
+  if(d.calibration?.source==='flat')parts.push('ground: flat scale');
+  parts.push(`${d.fps} FPS`);
+  return parts.join('  ·  ');
+}
+
+function badge(id,text,state){
+  const e=document.getElementById(id);if(!e)return;
+  e.textContent=text;e.className='nfr-badge'+(state===true?' ok':state===false?' bad':'');
 }
 
 function update(d){
@@ -504,14 +568,30 @@ function update(d){
   if(nfEl){nfEl.textContent=nfr.fps_pass?'Pass':'Fail';nfEl.className=nfr.fps_pass?'nfr-pass':'nfr-fail'}
   const nlEl=document.getElementById('nfr-lat');
   if(nlEl){nlEl.textContent=nfr.latency_pass?'Pass':'Fail';nlEl.className=nfr.latency_pass?'nfr-pass':'nfr-fail'}
+  const fOk=(d.fusion?.confidence??0)>=0.70;
+  const nfuEl=document.getElementById('nfr-fusion');
+  if(nfuEl){nfuEl.textContent=fOk?'Pass':'Low';nfuEl.className=fOk?'nfr-pass':'nfr-fail'}
   setText('nfr-iot',d.fusion?.iot_mode==='live'?'Live':'Simulated');
-  setText('nfr-prior',d.fusion?.mobility_prior==='eth_ucy'?'Active':'Uniform');
-  if(d.model){setText('kv-model',`${d.model} · ${d.device}`);setText('sh-model',`${d.model} + ByteTrack`)}
+  badge('bd-fps',`FPS ${d.fps}`,!!nfr.fps_pass);
+  badge('bd-lat',`${Math.round(d.latency_ms)} ms`,!!nfr.latency_pass);
+  const replay=d.mode==='replay';
+  badge('bd-dev',replay?'replay':String(d.device||'—').toUpperCase(),replay?null:!String(d.device).startsWith('cpu'));
+  setText('mode-text',replay?'REPLAY':'LIVE');
+  if(d.source!==undefined){setText('sh-site',d.source);if(d.source!==curSource&&!switching)markSource(d.source)}
+  if(replay){
+    setText('kv-model','recorded tracks');setText('sh-model','recorded tracks');
+  }else if(d.model){setText('kv-model',`${d.model} · ${d.device}`);setText('sh-model',`${d.model} + ByteTrack`)}
   const cal=d.calibration||{};
   setText('kv-ground',
     cal.camera_height_m?`${cal.source==='pedestrians'?'est. ':''}cam ${cal.camera_height_m} m · ${Math.round(cal.pitch_deg)}°`:
     cal.points?`${cal.points}-point calibration`:
     cal.width_m?`${cal.source==='pedestrians'?'est. ':''}flat ${Math.round(cal.width_m)}×${Math.round(cal.height_m)} m`:'—');
+
+  const dEl2=document.getElementById('kv-dense');
+  if(dEl2){dEl2.textContent=replay?'—':d.dense_mode?'On':'Off';dEl2.style.color=d.dense_mode?'var(--risk-med)':'inherit'}
+  const dc=d.detections||{};
+  setText('kv-found',replay||dc.bodies===undefined?'—':
+    `${dc.bodies} body · ${dc.heads} head`+(dc.points?` · ${dc.points} pt`:''));
 
   setText('sh-frame','#'+String(frameN).padStart(4,'0'));
   setText('sh-time',new Date().toLocaleTimeString('en-IN'));
@@ -523,10 +603,10 @@ function update(d){
     if(img){img.src='data:image/jpeg;base64,'+imageData;img.style.display='block'}
     if(nf)nf.style.display='none';
     setText('cam-fps',(d.fps||0)+' FPS');
-    setText('cam-label',`LIVE · ${n} tracked · ${rl} risk · Fusion conf ${(d.fusion?.confidence||0).toFixed(2)}`);
+    setText('cam-label',`${replay?'REPLAY':'LIVE'} · ${n} tracked · ${rl} risk · Fusion conf ${(d.fusion?.confidence||0).toFixed(2)}`);
   }
 
-  if(d.zones)buildZoneGrid(d.zones);
+  if(d.zones){lastZones=d.zones;buildZoneGrid(d.zones);if(selZone)renderZone()}
   buildAlerts(d.alerts||[]);
 
   // Fusion panel
@@ -557,8 +637,9 @@ function update(d){
   setText('sim-los',los);
 
   // Ticker
-  tIdx=(tIdx+1)%TICKERS.length;
-  setText('ticker-text',(d.alerts&&d.alerts.length>0)?d.alerts.join('  ·  '):TICKERS[tIdx]);
+  const hasAlerts=d.alerts&&d.alerts.length>0;
+  setText('ticker-label',hasAlerts?'ALERT':'STATUS');
+  setText('ticker-text',hasAlerts?d.alerts.join('  ·  '):statusLine(d,rl,tr));
   const tdEl=document.getElementById('ticker-dot');
   if(tdEl)tdEl.style.background=rl==='HIGH'?'var(--risk-hi)':rl==='MEDIUM'?'var(--saffron)':'var(--green)';
   setText('ticker-count',alertHistory.length+' alerts');
@@ -586,7 +667,9 @@ function connect(){
   ws.onerror=()=>ws.close();
 }
 
+setText('ws-url',WS_URL);
 connect();
+loadSources();
 </script>
 </body>
 </html>
