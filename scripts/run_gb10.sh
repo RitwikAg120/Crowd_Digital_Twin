@@ -80,8 +80,11 @@ if [ "$WHAT" = train ] || [ "$WHAT" = all ]; then
     TRAIN=("${CH[@]}")
     [ "$KUMBH_POINTS_OK" = 1 ] && TRAIN+=(--data points:dataset/kumbh_points)
     AMP=(); [ "$DEVICE" != cpu ] && AMP=(--amp)
+    # Up to 100 epochs, stopping once 5 in a row bring no better validation MAE;
+    # a rerun continues where the last one stopped (--resume)
     run train_dense python train_dense.py "${TRAIN[@]}" --init imagenet --epochs 100 "${AMP[@]}" \
-        --batch 8 --val-max 300 --device "$DEVICE" --out weights/p2pnet_crowd.pth
+        --batch 8 --val-max 300 --val-every 1 --patience 5 --resume --device "$DEVICE" \
+        --out weights/p2pnet_crowd.pth
     if [ -f weights/p2pnet_crowd.pth ]; then
       weights "dense count (trained)" && run dense_trained python evaluate.py dense "${CH[@]}" --max 500 \
           --weights weights/p2pnet_crowd.pth "${DEV[@]}"

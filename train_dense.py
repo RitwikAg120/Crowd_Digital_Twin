@@ -240,6 +240,11 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--lr-backbone", type=float, default=1e-5)
     ap.add_argument("--val-every", type=int, default=5)
+    ap.add_argument("--patience", type=int, default=0,
+                    help="stop after N validations without a better MAE (0 = never); "
+                         "use with --val-every 1 to mean N epochs")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from <out>.last.pth (saved after every epoch)")
     ap.add_argument("--val-max", type=int, default=0, help="validate on at most N images (0 = all)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -275,9 +280,18 @@ def main():
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     amp = args.amp and args.device.startswith("cuda")
-    best, step, log = math.inf, 0, []
+    best, step, log, stale, start = math.inf, 0, [], 0, 1
+    last_path = out.with_suffix(".last.pth")
+    if args.resume and last_path.exists():
+        st = torch.load(str(last_path), map_location=args.device, weights_only=True)
+        model.load_state_dict(st["model"])
+        opt.load_state_dict(st["opt"])
+        best, stale, start = st["best"], st["stale"], st["epoch"] + 1
+        log = json.loads(out.with_suffix(".log.json").read_text()) if out.with_suffix(".log.json").exists() else []
+        print(f"  resuming after epoch {st['epoch']} (best MAE {best:.1f}, {stale} without improvement)")
     t0 = time.time()
-    for epoch in range(1, args.epochs + 1):
+    epoch = start - 1
+    for epoch in range(start, args.epochs + 1):
         model.train()
         losses = []
         for x, targets in loader:
@@ -301,11 +315,21 @@ def main():
             msg += f" | val MAE {mae:.1f} RMSE {rmse:.1f}"
             log.append({"epoch": epoch, "mae": mae, "rmse": rmse, "loss": float(l[0])})
             if mae < best:
-                best = mae
+                best, stale = mae, 0
                 torch.save({"model": model.state_dict(), "row": 2, "epoch": epoch, "mae": mae,
                             "rmse": rmse, "data": args.data}, out)
                 msg += "  → saved"
+            else:
+                stale += 1
+                msg += f"  (no improvement: {stale}/{args.patience or '∞'})"
+            out.with_suffix(".log.json").write_text(json.dumps(log, indent=2))
         print(msg, flush=True)
+        # Everything needed to resume after this epoch
+        torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "epoch": epoch,
+                    "best": best, "stale": stale}, last_path)
+        if args.patience and stale >= args.patience:
+            print(f"Stopping early: validation MAE hasn't improved for {stale} checks.", flush=True)
+            break
         if last:
             break
     if not val:
