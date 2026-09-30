@@ -79,6 +79,37 @@ def test_heads_without_bodies_become_people():
     assert len(boxes) == 2 and src == ["point", "point"]
 
 
+def test_head_points_sized_by_perspective():
+    from dense import HeadScale
+    rng = np.random.default_rng(2)
+    hs = HeadScale()
+    assert hs.predict([100]) is None
+    heads = []
+    for y in rng.uniform(40, 420, 300):                   # heads grow 3 px per 100 rows
+        s = 0.03 * y + 4 + rng.normal(0, 0.4)
+        heads.append({"box": [200, y - s / 2, 200 + s, y + s / 2], "confidence": 0.7})
+    heads += [{"box": [0, y, 70, y + 70], "confidence": 0.9} for y in (80, 160, 240)]   # false hits
+    hs.add(heads)
+    got = hs.predict([50, 400])
+    assert np.allclose(got, [5.5, 16.0], atol=0.6), got
+    # Sparse points (the point model missed their neighbours) still get head-sized boxes
+    fake = SimpleNamespace(_inside_any=CDTPipeline._inside_any)
+    pts = (np.array([[100.0, 50.0], [600.0, 400.0]]), np.array([0.9, 0.8]))
+    boxes, _, _ = CDTPipeline._unmatched_heads(fake, np.zeros((0, 4), np.float32), [], pts, hs)
+    assert np.allclose(boxes[:, 2] - boxes[:, 0], got, atol=1e-3)
+    return f"head size {got[0]:.1f} px at row 50, {got[1]:.1f} px at row 400"
+
+
+def test_heads_are_tracked_by_their_heads():
+    boxes = np.array([[100, 100, 110, 112]], np.float32)
+    big = CDTPipeline._scale_boxes(boxes, 2.0)   # (any factor)
+    assert np.allclose(big, [[95, 94, 115, 118]])
+    assert np.allclose(CDTPipeline._scale_boxes(big, 0.5), boxes)
+    fake = SimpleNamespace(zone_mgr=SimpleNamespace(ground=GroundPlane.flat(H, W)))
+    person = CDTPipeline._person_boxes(fake, boxes)
+    assert person[0, 1] == 100 and abs(person[0, 3] - (112 + (Config.BODY_PER_HEAD - 1) * 12)) < 1e-3
+
+
 def _torch():
     try:
         import torch  # noqa: F401

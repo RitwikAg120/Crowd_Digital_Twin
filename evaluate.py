@@ -7,7 +7,7 @@ Layer N — Quantitative evaluation of the Crowd Digital Twin.
   python evaluate.py tracks --source videos/demo.mp4 --out dataset/tracks/demo
       One pass of the detector + tracker over a video, saved as MOT tracks
       (for `forecast` and `--replay`).
-  python evaluate.py mot17 --seq <MOT17>/train/MOT17-09-FRCNN [--frames N]
+  python evaluate.py mot17 --seq <MOT17>/train/MOT17-09-FRCNN [--frames N] [--start-frac 0.85]
       Crowd-count MAE / RMSE / Pearson r and CLEAR-MOT tracking accuracy (MOTA).
   python evaluate.py dense --data crowdhuman:dataset/CrowdHuman [--max 500]
       Crowd-count error on CrowdHuman val: bodies, bodies + heads (normal
@@ -129,8 +129,7 @@ def bench(args) -> dict:
     h, w = fit_within(int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
                       int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                       Config.FRAME_HEIGHT, Config.FRAME_WIDTH)
-    pipe = CDTPipeline(record_experience=False)
-    pipe.calib_name = Path(args.source).stem
+    pipe = CDTPipeline(record_experience=False, name=Path(args.source).stem)
     pipe.configure(h, w, src_fps)
 
     e2e, detect = [], []
@@ -192,8 +191,7 @@ def tracks(args) -> dict:
     h, w = fit_within(int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
                       int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                       Config.FRAME_HEIGHT, Config.FRAME_WIDTH)
-    pipe = CDTPipeline(record_experience=False)
-    pipe.calib_name = Path(args.source).stem          # names its saved auto-calibration
+    pipe = CDTPipeline(record_experience=False, name=Path(args.source).stem)
     pipe.configure(h, w, src_fps)
 
     out = Path(args.out)
@@ -241,8 +239,12 @@ def mot17(args) -> dict:
     img_dir  = seq / s.get("imDir", "img1")
     ext      = s.get("imExt", ".jpg")
     n_frames = int(s["seqLength"])
+    # Frames the body model never trained on: its notebook (reference/yolo26smodel.ipynb)
+    # kept the last int(N × 0.15) frames of each MOT17 train sequence for validation
+    n_held = int(n_frames * round(1.0 - args.start_frac, 6))
+    first  = n_frames - n_held + 1 if args.start_frac > 0 else 1
     if args.frames:
-        n_frames = min(n_frames, args.frames)
+        n_frames = min(n_frames, first + args.frames - 1)
 
     gt = np.loadtxt(seq / "gt" / "gt.txt", delimiter=",", ndmin=2)
     gt = gt[(gt[:, 6] == 1) & (gt[:, 7] == 1)]          # scored pedestrians only
@@ -252,11 +254,11 @@ def mot17(args) -> dict:
             (int(row[1]), row[2], row[3], row[2] + row[4], row[3] + row[5]))
 
     Config.FRAME_SKIP = 1                               # MOT scoring needs every frame
-    pipe = CDTPipeline(record_experience=False)
+    pipe = CDTPipeline(record_experience=False, name=seq.name)
     pipe.configure(h, w, fps)
 
     frames, pred_counts, gt_counts = [], [], []
-    for f in range(1, n_frames + 1):
+    for f in range(first, n_frames + 1):
         img = cv2.imread(str(img_dir / f"{f:06d}{ext}"))
         if img is None:
             break
@@ -277,6 +279,8 @@ def mot17(args) -> dict:
     return {
         "sequence": seq.name,
         "frames":   len(frames),
+        "first_frame": first,
+        "held_out": args.start_frac > 0,
         "device":   pipe.device,
         "model":    pipe.model_name,
         **count_errors(pred_counts, gt_counts),
@@ -303,9 +307,10 @@ def dense(args) -> dict:
         samples = random.Random(0).sample(samples, args.max)
     pipe = CDTPipeline(record_experience=False)
     points_model = pipe.points_model
-    if args.weights:
+    if args.weights or (points_model is not None and points_model.enhance != args.enhance):
         from dense import PointCounter
-        points_model = PointCounter(args.weights, pipe.device, Config.DENSE_THRESHOLD, half=pipe.half)
+        points_model = PointCounter(args.weights or Config.DENSE_MODEL, pipe.device,
+                                    Config.DENSE_THRESHOLD, half=pipe.half, enhance=args.enhance)
     rows = []
     from train_dense import load_image
     for i, (kind, path, pts, ignore) in enumerate(samples):
@@ -325,7 +330,7 @@ def dense(args) -> dict:
         if (i + 1) % 20 == 0:
             print(f"  {i + 1}/{len(samples)} images")
     methods = [m for m in ("body", "body_plus_head", "body_plus_head_dense", "points") if m in rows[0]]
-    res = {"images": len(rows), "device": pipe.device,
+    res = {"images": len(rows), "device": pipe.device, "enhance": args.enhance,
            "point_model": (args.weights or (Config.DENSE_MODEL if points_model else None)),
            "mean_gt": float(np.mean([r["gt"] for r in rows]))}
     for kind in sorted({r["dataset"] for r in rows}) + ["all"]:
@@ -646,6 +651,9 @@ def main():
     m = sub.add_parser("mot17", help="count error + MOTA on a MOT17 sequence")
     m.add_argument("--seq", required=True, help="e.g. MOT17/train/MOT17-09-FRCNN")
     m.add_argument("--frames", type=int, default=0, help="0 = whole sequence")
+    m.add_argument("--start-frac", type=float, default=0.0,
+                   help="score only frames after this fraction of the sequence "
+                        "(0.85 = the body model's held-out validation frames)")
 
     d = sub.add_parser("dense", help="crowd-count error on CrowdHuman val")
     d.add_argument("--data", action="append", required=True,
@@ -653,6 +661,8 @@ def main():
     d.add_argument("--weights", help="point-model checkpoint (default: Config.DENSE_MODEL if present)")
     d.add_argument("--max", type=int, default=0, help="at most N images (0 = all)")
     d.add_argument("--max-side", type=int, default=2048, help="downscale larger images")
+    d.add_argument("--enhance", action="store_true",
+                   help="equalise contrast before the point model (as the live pipeline does)")
 
     f = sub.add_parser("forecast", help="20 s forecast vs what actually happened")
     f.add_argument("--tracks", nargs="+", required=True,

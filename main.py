@@ -91,8 +91,10 @@ class Config:
     HBOX_CONF_DENSE   = 0.15
     DENSE_MODEL       = "weights/p2pnet_crowd.pth"   # head-point model (dense.py), used if present
     DENSE_THRESHOLD   = 0.5        # head score for a point
+    DENSE_ENHANCE     = True       # equalise contrast before the point model (fog, dusk)
     DENSE_EVERY       = 1          # run the point model every Nth processed frame in dense mode
     DENSE_PROBE_EVERY = 50         # with the point model: look for a dense crowd every Nth frame
+    HEAD_TRACK_SCALE  = 3.0        # heads are tracked as boxes this many head sizes wide
                                    # even when the head detector sees none (drone / overhead views)
     CALIB_MIN_HEADS   = 600        # head boxes to calibrate from, when bodies are too few
 
@@ -2009,10 +2011,17 @@ class TwinPipeline:
                 (det["x1"], det["y1"], det["x2"], det["y2"])
             )
 
+            # A person found only by their head = an orange head box: their
+            # whole-person box would cover the people in front of them
+            if "head" in det:
+                hx1, hy1, hx2, hy2 = map(int, det["head"])
+                cv2.rectangle(overlay, (hx1, hy1), (hx2, hy2), (0, 140, 255), 1)
+                continue
+
             label = f"#{det['id']} {det['confidence']:.2f}"
 
-            # Full-body box = yellow; a person found only by their head = orange
-            col = (0, 255, 255) if det.get("src", "body") == "body" else (0, 140, 255)
+            # Full-body box = yellow
+            col = (0, 255, 255)
 
             cv2.rectangle(
                 overlay,
@@ -2032,8 +2041,11 @@ class TwinPipeline:
                 1
             )
         # ── Draw HBOX detections ──────────────────────────────────────────
+        # Not when the head points count the heads (they'd be drawn twice), and
+        # without labels in a dense crowd, where they would cover the picture
+        points_used = any(d.get("src") == "point" for d in det_list)
 
-        for hbox in hbox_detections:
+        for hbox in (() if points_used else hbox_detections):
 
             x1, y1, x2, y2 = map(
                 int,
@@ -2050,8 +2062,10 @@ class TwinPipeline:
                 (x1, y1),
                 (x2, y2),
                 col,
-                2
+                1 if self.dense else 2
             )
+            if self.dense:
+                continue
 
             cv2.putText(
                 overlay,
@@ -2064,7 +2078,7 @@ class TwinPipeline:
             )
 
         for a in agents_now:
-            cv2.circle(overlay, (int(a.x), int(a.y)), 4, (0, 0, 255), -1)
+            cv2.circle(overlay, (int(a.x), int(a.y)), 2 if self.dense else 4, (0, 0, 255), -1)
 
         _, buf        = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 72])
         annotated_b64 = base64.b64encode(buf).decode()
@@ -2163,6 +2177,7 @@ class TwinPipeline:
                     "y2":    round(float(det["y2"]), 1),
                     "conf":  round(float(det["confidence"]), 3),
                     "zone":  det.get("zone", ""),
+                    "src":   det.get("src", "body"),
                 }
                 for det in det_list if "x1" in det
             ],
@@ -2297,7 +2312,7 @@ class ReplayPipeline(TwinPipeline):
 class CDTPipeline(TwinPipeline):
     """Live pipeline: video → YOLO26 body + head detection → ByteTrack → twin."""
 
-    def __init__(self, source=None, record_experience: bool = True):
+    def __init__(self, source=None, record_experience: bool = True, name: Optional[str] = None):
         # Detection needs PyTorch; the twin-only mode never imports it.
         # Keep Ultralytics off the network (update checks, telemetry); it reads
         # this once on import. Set YOLO_OFFLINE=0 to allow it.
@@ -2309,6 +2324,8 @@ class CDTPipeline(TwinPipeline):
 
         self.video  = VideoInputHandler(source) if source is not None else None
         self._name_source(source)
+        if name:                                 # e.g. evaluate.py, which reads frames itself
+            self.calib_name = name
         self._switch_lock = threading.Lock()     # held while a frame is processed
         self.device = resolve_device(Config.DEVICE)
         self.half   = Config.HALF and self.device != "cpu"
@@ -2351,7 +2368,8 @@ class CDTPipeline(TwinPipeline):
             from dense import PointCounter
             try:
                 self.points_model = PointCounter(Config.DENSE_MODEL, self.device,
-                                                 Config.DENSE_THRESHOLD, half=self.half)
+                                                 Config.DENSE_THRESHOLD, half=self.half,
+                                                 enhance=Config.DENSE_ENHANCE)
                 print(f"[CDT] Dense-crowd point model: {Config.DENSE_MODEL}")
             except Exception as e:
                 print(f"[CDT] Dense-crowd point model not loaded ({e}); using head boxes only.")
@@ -2359,6 +2377,8 @@ class CDTPipeline(TwinPipeline):
 
         self._hbox_last: List[dict] = []
         self._points_last = (np.zeros((0, 2)), np.zeros(0))
+        from dense import HeadScale
+        self.head_scale = HeadScale()            # head size by image row, for head points
         self.dense = False                       # dense mode: heads at high resolution + points
         self.camera_motion = CameraMotion()
         self.det_counts = {"bodies": 0, "heads": 0, "points": 0}
@@ -2394,6 +2414,7 @@ class CDTPipeline(TwinPipeline):
             self._proc_times.clear()
             self._hbox_last = []
             self._points_last = (np.zeros((0, 2)), np.zeros(0))
+            self.head_scale = type(self.head_scale)()
             self.dense = False
             self.camera_motion = CameraMotion()
             h, w = fit_within(*new.resolution, Config.FRAME_HEIGHT, Config.FRAME_WIDTH)
@@ -2487,6 +2508,7 @@ class CDTPipeline(TwinPipeline):
                 Config.HBOX_IMGSZ_DENSE if self.dense else Config.HBOX_IMGSZ,
             )
         hbox_detections = self._hbox_last
+        self.head_scale.add(hbox_detections)
 
         # Head points from the dense-crowd model (when loaded): every frame in
         # dense mode, else now and then as a probe — overhead and drone views
@@ -2502,7 +2524,8 @@ class CDTPipeline(TwinPipeline):
         # ── People with no body box: heads (or head points) ───────────────
         bodies = np.array([d["box"] for d in fbox_detections], np.float32).reshape(-1, 4)
         extra_heads, extra_conf, extra_src = self._unmatched_heads(
-            bodies, hbox_detections, self._points_last if use_points else None)
+            bodies, hbox_detections, self._points_last if use_points else None,
+            self.head_scale)
         if Config.DENSE_AUTO:
             n_x = len([h for h in hbox_detections
                        if not self._inside_any(h["box"], bodies)])
@@ -2515,22 +2538,21 @@ class CDTPipeline(TwinPipeline):
                 print(f"[CDT] Dense mode {'on' if on else 'off'} ({n_x} heads without a body, "
                       f"{len(bodies)} bodies)")
 
-        # Heads become whole-person boxes: head on top, feet from the ground geometry
-        pseudo = np.zeros((0, 4), np.float32)
-        if len(extra_heads):
-            feet, body_h = self.zone_mgr.ground.feet_from_heads(extra_heads)
-            half_w = np.maximum((extra_heads[:, 2] - extra_heads[:, 0]) * 1.1, 2.0)
-            pseudo = np.column_stack([feet[:, 0] - half_w, extra_heads[:, 1],
-                                      feet[:, 0] + half_w, feet[:, 1]]).astype(np.float32)
+        # Heads become whole-person boxes: head on top, feet from the ground geometry.
+        # These boxes are what the twin measures and what the camera-motion
+        # estimate masks out, but in a dense crowd each one covers the heads of
+        # the people in front, so the tracker follows the heads themselves.
+        pseudo = self._person_boxes(extra_heads)
         n_b = len(bodies)
         xyxy = np.vstack([bodies, pseudo])
+        track_xyxy = np.vstack([bodies, self._scale_boxes(extra_heads, Config.HEAD_TRACK_SCALE)])
         conf = np.concatenate([[d["confidence"] for d in fbox_detections], extra_conf]).astype(np.float32)
         # The tracker only starts tracks from confident detections: heads passed
         # their own threshold, so they are tracked at a neutral confidence
         track_conf = conf.copy()
         track_conf[n_b:] = np.maximum(track_conf[n_b:], Config.YOLO_CONF + 0.2)
         src = np.array(["body"] * n_b + list(extra_src))
-        dets = self._sv.Detections(xyxy=xyxy.reshape(-1, 4), confidence=track_conf,
+        dets = self._sv.Detections(xyxy=track_xyxy.reshape(-1, 4), confidence=track_conf,
                                    class_id=np.where(src == "body", 0, 1).astype(int),
                                    data={"src": src, "conf": conf})
         self.det_counts = {"bodies": n_b, "heads": int((src == "head").sum()),
@@ -2541,11 +2563,15 @@ class CDTPipeline(TwinPipeline):
 
         det_list = []
         if tracked.tracker_id is not None and len(tracked):
-            for (x1, y1, x2, y2), tid, c, s in zip(
-                tracked.xyxy.astype(float), tracked.tracker_id,
-                tracked.data["conf"], tracked.data["src"]
-            ):
-                det_list.append({
+            boxes = tracked.xyxy.astype(np.float32)
+            is_head = tracked.data["src"] != "body"
+            heads = self._scale_boxes(boxes[is_head], 1.0 / Config.HEAD_TRACK_SCALE)
+            boxes[is_head] = self._person_boxes(heads)
+            head_of = dict(zip(np.flatnonzero(is_head), heads))
+            for k, ((x1, y1, x2, y2), tid, c, s) in enumerate(zip(
+                boxes.astype(float), tracked.tracker_id, tracked.data["conf"], tracked.data["src"]
+            )):
+                det = {
                     "id":         int(tid),
                     "x1":         x1,
                     "y1":         y1,
@@ -2557,7 +2583,10 @@ class CDTPipeline(TwinPipeline):
                     "src":        str(s),
                     # Feet guessed from a head are less certain than a body box's
                     "noise_scale": 1.0 if s == "body" else 1.5,
-                })
+                }
+                if k in head_of:
+                    det["head"] = head_of[k].tolist()
+                det_list.append(det)
 
         # ── Camera motion: measure people against the ground, not the image ──
         to_ref = None
@@ -2584,19 +2613,39 @@ class CDTPipeline(TwinPipeline):
         return bool(((bodies[:, 0] <= cx) & (cx <= bodies[:, 2]) &
                      (bodies[:, 1] <= cy) & (cy <= bodies[:, 3])).any())
 
-    def _unmatched_heads(self, bodies: np.ndarray, heads: List[dict], points=None):
+    @staticmethod
+    def _scale_boxes(boxes, k: float) -> np.ndarray:
+        """Boxes (N, 4) scaled k times about their centres."""
+        b = np.asarray(boxes, np.float32).reshape(-1, 4)
+        c, half = (b[:, :2] + b[:, 2:]) / 2, (b[:, 2:] - b[:, :2]) / 2 * k
+        return np.hstack([c - half, c + half])
+
+    def _person_boxes(self, heads) -> np.ndarray:
+        """Whole-person boxes for head boxes: from the top of the head to the feet."""
+        heads = np.asarray(heads, np.float32).reshape(-1, 4)
+        if not len(heads):
+            return np.zeros((0, 4), np.float32)
+        feet, _ = self.zone_mgr.ground.feet_from_heads(heads)
+        half_w = np.maximum((heads[:, 2] - heads[:, 0]) * 1.1, 2.0)
+        return np.column_stack([feet[:, 0] - half_w, heads[:, 1],
+                                feet[:, 0] + half_w, feet[:, 1]]).astype(np.float32)
+
+    def _unmatched_heads(self, bodies: np.ndarray, heads: List[dict], points=None,
+                         head_scale=None):
         """
         Heads of people the body detector missed, as head boxes (N, 4), their
         confidences and where they came from ("head" / "point"). With head
         points (dense model) the points are used — they find far more heads —
-        each given a head box sized by how close its neighbours are.
+        each given a head box sized for its row by `head_scale` (dense.HeadScale,
+        learned from the head detector), else by how close its neighbours are.
         """
         if not Config.HEADS_AS_PEOPLE:
             return np.zeros((0, 4), np.float32), np.zeros(0), []
         if points is not None and len(points[0]):
             from dense import head_sizes
             pts, sc = points
-            s = head_sizes(pts) / 2
+            size = head_scale.predict(pts[:, 1]) if head_scale is not None else None
+            s = (size if size is not None else head_sizes(pts)) / 2
             boxes = np.column_stack([pts[:, 0] - s, pts[:, 1] - s, pts[:, 0] + s, pts[:, 1] + s])
             keep = [i for i, b in enumerate(boxes) if not self._inside_any(b, bodies)]
             return boxes[keep].astype(np.float32), sc[keep], ["point"] * len(keep)

@@ -7,7 +7,7 @@
 #
 #   bash scripts/gb10_setup.sh                      # once
 #   python scripts/fetch_datasets.py all            # MOT17 sequences + CrowdHuman check
-#   bash scripts/run_gb10.sh [measure|train|all]    # default: all
+#   bash scripts/run_gb10.sh [measure|mot17|train|all]    # default: all
 #
 # Needs, besides the code: weights/yolo26strained.pt and weights/yoloheadv26s.pt
 # (not in git — copy them from the laptop), dataset/MOT17 and dataset/CrowdHuman,
@@ -53,11 +53,21 @@ if [ "$WHAT" = measure ] || [ "$WHAT" = all ]; then
     fi
   done
 
-  # 2. Tracking and counting on MOT17
+fi
+
+if [ "$WHAT" = measure ] || [ "$WHAT" = all ] || [ "$WHAT" = mot17 ]; then
+  # 2. Tracking and counting on MOT17. The body model trained on the first 85%
+  #    of every sequence, so the honest numbers are on the last 15% (_heldout);
+  #    the whole-sequence run is kept for comparison.
   for s in $MOT17_SEQS; do
+    weights "mot17 $s" && run "mot17_${s}_heldout" python evaluate.py mot17         --seq "dataset/MOT17/train/$s" --start-frac 0.85 "${DEV[@]}"
+    [ "$WHAT" = mot17 ] && continue
     weights "mot17 $s" && run "mot17_$s" python evaluate.py mot17 --seq "dataset/MOT17/train/$s" "${DEV[@]}"
   done
   [ -z "$MOT17_SEQS" ] && echo "--- skip mot17: no sequences (python scripts/fetch_datasets.py mot17)"
+fi
+
+if [ "$WHAT" = measure ] || [ "$WHAT" = all ]; then
 
   # 3. The 20 s forecast against what really happened (MOT17 ground truth; no weights needed)
   if [ -n "$MOT17_SEQS" ]; then
