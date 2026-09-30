@@ -1,6 +1,24 @@
 __pycache__/
 *.pyc
-venv/
+venv*/
 .venv/
 runs/
 *.log
+
+# runtime output from the experience buffer
+experience/logs/
+experience/frames/
+
+# Large datasets / media
+videos/
+dataset/
+
+# Model weights
+*.pt
+weights/
+
+# Generated results
+results/
+results.csv
+# Local handoff notes (not published)
+handoff.md
