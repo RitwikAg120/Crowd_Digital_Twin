@@ -96,11 +96,14 @@ def test_nobody_is_counted_twice():
     sc = np.array([0.9, 0.9, 0.6, 0.8, 0.8, 0.55])
     hs = HeadScale()
     hs.add([{"box": [0, y - 5, 10, y + 5], "confidence": 0.8} for y in np.linspace(20, 400, 60)])
-    boxes, _, _ = CDTPipeline._unmatched_heads(fake, bodies, [], (pts, sc), hs)
+    boxes, _, _ = CDTPipeline._unmatched_heads(fake, bodies, [], (pts, sc), hs, crowd=True)
     centres = (boxes[:, :2] + boxes[:, 2:]) / 2
     assert len(boxes) == 2, centres
     assert np.allclose(sorted(centres[:, 0]), [212, 400]), centres
-    return "2 bodies + 6 points → 4 people"
+    # Outside a dense crowd a head inside a body box is that body's own
+    boxes, _, _ = CDTPipeline._unmatched_heads(fake, bodies, [], (pts, sc), hs)
+    assert np.allclose((boxes[:, 0] + boxes[:, 2]) / 2, [400]), boxes
+    return "dense crowd: 2 bodies + 6 points → 4 people; otherwise → 3"
 
 
 def test_head_points_sized_by_perspective():

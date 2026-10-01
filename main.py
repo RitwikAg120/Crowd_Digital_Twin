@@ -89,7 +89,10 @@ class Config:
     DENSE_HEAD_RATIO  = 0.5        # … and they are ≥ this share of the bodies
     HBOX_IMGSZ_DENSE  = 2560       # head detector input in dense mode (3–10 px heads)
     HBOX_CONF_DENSE   = 0.15
-    DENSE_MODEL       = "weights/p2pnet_crowd.pth"   # head-point model (dense.py), used if present
+    # Head-point model (dense.py), used if present: fine-tuned on JHU-Crowd++ as
+    # well (dense, foggy and high-view crowds), else the CrowdHuman-only one
+    DENSE_MODEL       = next((w for w in ("weights/p2pnet_crowd_jhu.pth", "weights/p2pnet_crowd.pth")
+                              if Path(w).exists()), "weights/p2pnet_crowd.pth")
     DENSE_THRESHOLD   = 0.5        # head score for a point
     DENSE_ENHANCE     = True       # equalise contrast before the point model (fog, dusk)
     DENSE_EVERY       = 1          # run the point model every Nth processed frame in dense mode
@@ -2525,7 +2528,7 @@ class CDTPipeline(TwinPipeline):
         bodies = np.array([d["box"] for d in fbox_detections], np.float32).reshape(-1, 4)
         extra_heads, extra_conf, extra_src = self._unmatched_heads(
             bodies, hbox_detections, self._points_last if use_points else None,
-            self.head_scale)
+            self.head_scale, crowd=self.dense)
         if Config.DENSE_AUTO:
             hb = np.array([h["box"] for h in hbox_detections], np.float32).reshape(-1, 4)
             n_x = int((~self._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, bodies)).sum())
@@ -2605,20 +2608,25 @@ class CDTPipeline(TwinPipeline):
         )
 
     @staticmethod
-    def _heads_of_bodies(centres, bodies: np.ndarray) -> np.ndarray:
+    def _heads_of_bodies(centres, bodies: np.ndarray, crowd: bool = False) -> np.ndarray:
         """
         Which heads (centres, (N, 2)) belong to a body box — the same person,
         not someone to add. Each body owns at most one head: the one nearest
         where its head should be (top centre), within its width and from a
-        little above its top (heads poke out of the box) to 30% down. The
-        rest are other people, even inside a body box — in a dense crowd
-        that is someone standing behind. Returns a boolean mask.
+        little above its top (heads poke out of the box) to 30% down. In a
+        dense crowd (`crowd`) the other heads are other people, even inside a
+        body box: someone standing behind. Elsewhere a head inside a body box
+        is that person's (keeping them cost MOT17-02 half its MOTA: 0.55 → 0.29).
+        Returns a boolean mask.
         """
         c = np.asarray(centres, float).reshape(-1, 2)
         owned = np.zeros(len(c), bool)
         b = np.asarray(bodies, float).reshape(-1, 4)
         if not len(c) or not len(b):
             return owned
+        if not crowd:
+            owned |= ((b[None, :, 0] <= c[:, None, 0]) & (c[:, None, 0] <= b[None, :, 2]) &
+                      (b[None, :, 1] <= c[:, None, 1]) & (c[:, None, 1] <= b[None, :, 3])).any(axis=1)
         from scipy.optimize import linear_sum_assignment
         bw, bh = b[:, 2] - b[:, 0], b[:, 3] - b[:, 1]
         hx, hy = (b[:, 0] + b[:, 2]) / 2, b[:, 1] + 0.08 * bh           # where the head should be
@@ -2665,7 +2673,7 @@ class CDTPipeline(TwinPipeline):
                                 feet[:, 0] + half_w, feet[:, 1]]).astype(np.float32)
 
     def _unmatched_heads(self, bodies: np.ndarray, heads: List[dict], points=None,
-                         head_scale=None):
+                         head_scale=None, crowd: bool = False):
         """
         Heads of people the body detector missed, as head boxes (N, 4), their
         confidences and where they came from ("head" / "point"). With head
@@ -2687,10 +2695,10 @@ class CDTPipeline(TwinPipeline):
                 pts, sc, size = pts[m], sc[m], size[m]
             s = (size if size is not None else head_sizes(pts)) / 2
             boxes = np.column_stack([pts[:, 0] - s, pts[:, 1] - s, pts[:, 0] + s, pts[:, 1] + s])
-            keep = ~self._heads_of_bodies(pts, bodies)
+            keep = ~self._heads_of_bodies(pts, bodies, crowd)
             return boxes[keep].astype(np.float32), sc[keep], ["point"] * int(keep.sum())
         hb = np.array([h["box"] for h in heads], np.float32).reshape(-1, 4)
-        keep = ~self._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, bodies)
+        keep = ~self._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, bodies, crowd)
         return (hb[keep], np.array([h["confidence"] for h in heads], float).reshape(-1)[keep],
                 ["head"] * int(keep.sum()))
 
