@@ -78,9 +78,11 @@ def test_heads_without_bodies_become_people():
     heads = [{"box": [112, 102, 126, 118], "confidence": 0.6},     # this body's own head
              {"box": [300, 50, 310, 62], "confidence": 0.3}]       # someone the body detector missed
     boxes, conf, src = CDTPipeline._unmatched_heads(fake, bodies, heads)
+    assert len(boxes) == 0, "outside dense mode only bodies are people"
+    boxes, conf, src = CDTPipeline._unmatched_heads(fake, bodies, heads, crowd=True)
     assert len(boxes) == 1 and boxes[0][0] == 300 and src == ["head"]
     pts = (np.array([[120.0, 110.0], [400.0, 60.0], [410.0, 62.0]]), np.array([0.9, 0.8, 0.7]))
-    boxes, conf, src = CDTPipeline._unmatched_heads(fake, bodies, heads, pts)
+    boxes, conf, src = CDTPipeline._unmatched_heads(fake, bodies, heads, pts, crowd=True)
     assert len(boxes) == 2 and src == ["point", "point"]
 
 
@@ -100,8 +102,13 @@ def test_nobody_is_counted_twice():
     centres = (boxes[:, :2] + boxes[:, 2:]) / 2
     assert len(boxes) == 2, centres
     assert np.allclose(sorted(centres[:, 0]), [212, 400]), centres
-    # Outside a dense crowd a head inside a body box is that body's own
-    boxes, _, _ = CDTPipeline._unmatched_heads(fake, bodies, [], (pts, sc), hs)
+    # With heads as people everywhere, outside a dense crowd a head inside a
+    # body box is that body's own
+    Config.HEADS_AS_PEOPLE, keep = True, Config.HEADS_AS_PEOPLE
+    try:
+        boxes, _, _ = CDTPipeline._unmatched_heads(fake, bodies, [], (pts, sc), hs)
+    finally:
+        Config.HEADS_AS_PEOPLE = keep
     assert np.allclose((boxes[:, 0] + boxes[:, 2]) / 2, [400]), boxes
     return "dense crowd: 2 bodies + 6 points → 4 people; otherwise → 3"
 
@@ -122,7 +129,8 @@ def test_head_points_sized_by_perspective():
     # Sparse points (the point model missed their neighbours) still get head-sized boxes
     fake = _fake_pipeline()
     pts = (np.array([[100.0, 50.0], [600.0, 400.0]]), np.array([0.9, 0.8]))
-    boxes, _, _ = CDTPipeline._unmatched_heads(fake, np.zeros((0, 4), np.float32), [], pts, hs)
+    boxes, _, _ = CDTPipeline._unmatched_heads(fake, np.zeros((0, 4), np.float32), [], pts, hs,
+                                               crowd=True)
     assert np.allclose(boxes[:, 2] - boxes[:, 0], got, atol=1e-3)
     return f"head size {got[0]:.1f} px at row 50, {got[1]:.1f} px at row 400"
 

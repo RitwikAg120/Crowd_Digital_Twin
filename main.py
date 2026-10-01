@@ -81,7 +81,11 @@ class Config:
 
     # Dense crowds: people seen only as heads. Heads (or head points) with no
     # body box become people; when many are, dense mode looks harder.
-    HEADS_AS_PEOPLE   = True
+    # People seen only as a head: "dense" = in dense mode only. In normal crowds
+    # their guessed whole-body boxes add no one the body detector misses on
+    # MOT17 and cost MOTA (held-out 02 / 04 / 09: 0.48 / 0.54 / 0.47 with them,
+    # 0.49 / 0.62 / 0.70 without). True = always, False = never.
+    HEADS_AS_PEOPLE   = "dense"
     HEAD_SIZE_M       = 0.25       # head box height: the ruler when calibrating from heads
     BODY_PER_HEAD     = 7.0        # body height in head heights, without a camera model
     DENSE_AUTO        = True       # switch dense mode on/off by itself
@@ -2688,7 +2692,7 @@ class CDTPipeline(TwinPipeline):
         each body box claims its own head (_heads_of_bodies), so nobody is
         counted twice.
         """
-        if not Config.HEADS_AS_PEOPLE:
+        if not Config.HEADS_AS_PEOPLE or (Config.HEADS_AS_PEOPLE == "dense" and not crowd):
             return np.zeros((0, 4), np.float32), np.zeros(0), []
         if points is not None and len(points[0]):
             from dense import head_sizes
