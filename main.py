@@ -85,8 +85,11 @@ class Config:
     HEAD_SIZE_M       = 0.25       # head box height: the ruler when calibrating from heads
     BODY_PER_HEAD     = 7.0        # body height in head heights, without a camera model
     DENSE_AUTO        = True       # switch dense mode on/off by itself
-    DENSE_MIN_HEADS   = 15         # on when ≥ this many heads have no body …
-    DENSE_HEAD_RATIO  = 0.5        # … and they are ≥ this share of the bodies
+    # A dense crowd is mostly heads: MOT17-02 (a busy street, ~30 people) shows
+    # 15–35 heads without a body against ~20 bodies; the Kumbh clips 120–450
+    # against 6–22. Off again below half of both.
+    DENSE_MIN_HEADS   = 40         # on when ≥ this many heads have no body …
+    DENSE_HEAD_RATIO  = 2.0        # … and they are ≥ this many times the bodies
     HBOX_IMGSZ_DENSE  = 2560       # head detector input in dense mode (3–10 px heads)
     HBOX_CONF_DENSE   = 0.15
     # Head-point model (dense.py), used if present: fine-tuned on JHU-Crowd++ as
@@ -2533,7 +2536,8 @@ class CDTPipeline(TwinPipeline):
             hb = np.array([h["box"] for h in hbox_detections], np.float32).reshape(-1, 4)
             n_x = int((~self._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, bodies)).sum())
             if use_points:                      # the point model sees heads the detector can't
-                n_x = max(n_x, int((np.array(extra_src) == "point").sum()))
+                # counted as outside a dense crowd, so dense mode can't keep itself on
+                n_x = max(n_x, int((~self._heads_of_bodies(self._points_last[0], bodies)).sum()))
             on  = n_x >= Config.DENSE_MIN_HEADS and n_x >= Config.DENSE_HEAD_RATIO * len(bodies)
             off = n_x < Config.DENSE_MIN_HEADS / 2 or n_x < 0.5 * Config.DENSE_HEAD_RATIO * len(bodies)
             if (on and not self.dense) or (off and self.dense):
