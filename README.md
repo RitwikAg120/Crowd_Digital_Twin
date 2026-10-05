@@ -11,7 +11,7 @@ zone risk scoring and a live WebSocket dashboard.
 |----------------------------|--------------------------------------------------------------------------|
 | `main.py`                  | The full 15-layer (A–O) CDT pipeline + FastAPI/WebSocket server          |
 | `forecast.py`              | Layer K — motion filter, what the twin learns about the scene, the 20 s forecast and its self-check |
-| `dense.py`                 | Dense-crowd head points (P2PNet); used when `weights/p2pnet_crowd.pth` exists |
+| `dense.py`                 | Dense-crowd head points (P2PNet); used when `weights/p2pnet_crowd_jhu.pth` (or `_crowd.pth`) exists |
 | `iot.py`                   | Gate counters (Stream 2) over HTTP (`POST /api/iot`) or MQTT              |
 | `evaluate.py`              | Layer N — benchmarks and accuracy metrics; results go to `results/`      |
 | `train_dense.py`           | Trains the dense-crowd point model (run on the GB10)                     |
@@ -31,7 +31,7 @@ zone risk scoring and a live WebSocket dashboard.
 | `experience/`              | `ExperienceBuffer` — logs per-frame results (`logs/`) and sampled frames (`frames/`) |
 | `retrain/retrain_trigger.py` | Reports when enough experience samples exist to retrain              |
 | `videos/`                  | Demo footage                                                             |
-| `dataset/eth_ucy/`         | Optional ETH/UCY trajectory files for mobility priors                    |
+| `dataset/`                 | GB10 only: `MOT17/`, `CrowdHuman/`, `JHU-Crowd/` (not in git), `kumbh_points/` for your own labelled frames |
 | `requirements.txt`         | Full pipeline (PyTorch + YOLO26)                                         |
 | `requirements-twin.txt`    | Twin-only mode — no PyTorch                                              |
 
@@ -110,16 +110,19 @@ otherwise) and is tracked with the bodies.
 
 **Dense mode.** In a dense crowd (a ghat at the Kumbh) bodies are hidden and
 heads are 3–10 px, so both detectors miss most people. When many heads have
-no body (`DENSE_MIN_HEADS`, `DENSE_HEAD_RATIO`), the pipeline switches to
-dense mode by itself: the head detector runs at `HBOX_IMGSZ_DENSE` (2560 px)
-and, if `weights/p2pnet_crowd.pth` exists, the P2PNet point model (`dense.py`)
-finds one point per head — the model built for dense crowds. On
-`kumbhvideo4.mp4` the twin went from 3–23 tracked people per frame (bodies
-only) to ~106 with dense-mode heads; the point model is needed for the rest
-(the scene holds several hundred). Train it on the GB10 (`train_dense.py`,
-§5) or use the published P2PNet checkpoint there
-(`scripts/fetch_datasets.py p2pnet`, academic use only). The dashboard shows
-**Dense mode** and how people were **found** (body / head / point).
+no body (at least `DENSE_MIN_HEADS` = 40 of them, and ≥ `DENSE_HEAD_RATIO` = 2×
+the bodies), the pipeline switches to dense mode by itself: the head detector
+runs at `HBOX_IMGSZ_DENSE` (2560 px) and, if a point model is present, the
+P2PNet point model (`dense.py`) finds one point per head — the model built for
+dense crowds. The frame's contrast is equalised first (`DENSE_ENHANCE`) so heads
+in fog and at dusk stand out, and each head point is sized for its image row
+from the head detector's boxes (`dense.HeadScale`). On `kumbhvideo4.mp4` the twin
+went from 3–23 tracked people per frame (bodies only) to several hundred with the
+point model. The model is `weights/p2pnet_crowd_jhu.pth` if present (CrowdHuman +
+JHU-Crowd++, the better one for dense/foggy/high-view crowds), else
+`weights/p2pnet_crowd.pth` (CrowdHuman only); train either on the GB10
+(`train_dense.py`, §5). The dashboard shows **Dense mode** and how people were
+**found** (body / head / point).
 
 Inference runs on CUDA in FP16 when PyTorch sees a GPU, otherwise on CPU.
 Model paths, confidence thresholds, input sizes and `MAX_DET` (1000, so dense
@@ -219,23 +222,22 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
   (2 GB): the oldest logs and frames are deleted first. Replay mode does not
   log.
 
-### ETH/UCY mobility priors
-Drop ETH/UCY trajectory `.txt` files (4-column `frame id x y`, tab or space
-separated, or the 8-column ETH `obsmat` format) into `dataset/eth_ucy/` (the
-loader globs `**/*.txt`). Without them the pipeline uses uniform zone
-calibration; the dashboard shows which one is active.
-
 ## 5. Evaluation (Layer N)
 
 ```bash
 python evaluate.py bench --source videos/demo.mp4 --frames 200   # end-to-end FPS / latency
 python evaluate.py tracks --source videos/demo.mp4 --out dataset/tracks/demo   # one pass → MOT tracks
 python evaluate.py forecast --tracks dataset/tracks/demo          # 20 s forecast vs what happened
-python evaluate.py mot17 --seq <MOT17>/train/MOT17-09-FRCNN      # count MAE/RMSE/r + MOTA
-python evaluate.py ucf --root <UCF_CC_50 folder>                 # count error, body/head/both
-python evaluate.py dense --data shtech:<ShanghaiTech/part_A>     # dense-crowd count error
-python evaluate.py ade --root dataset/eth_ucy                    # ADE/FDE, ETH/UCY protocol
+python evaluate.py mot17 --seq <MOT17>/train/MOT17-09-FRCNN --start-frac 0.85  # count MAE/RMSE/r + MOTA on held-out frames
+python evaluate.py dense --data crowdhuman:dataset/CrowdHuman --max 500 --enhance   # crowd-count error
 ```
+
+`mot17 --start-frac 0.85` scores only the last 15 % of each sequence — the
+frames the body detector never trained on (its notebook held them out), so the
+numbers aren't inflated. `dense` reports count error for bodies, bodies + heads
+(normal and dense-mode resolution) and the point model, on CrowdHuman val
+(`crowdhuman:`), JHU-Crowd++ val (`jhu:`) or your own labelled frames
+(`points:`); `--enhance` applies the same contrast step the live pipeline uses.
 
 Each run prints its metrics and saves them as JSON in `results/`. `bench`
 measures the whole pipeline (decode → detection → tracking → twin → overlay →
@@ -247,17 +249,21 @@ velocity + Helbing social force bouncing off the view's edges) and the new
 twin, with ablations — then scores people's positions (ADE/FDE) and zone
 counts at 2.4–20 s against what actually happened.
 
-**Datasets and training run on the GB10**, not the laptop:
+**Datasets and training run on the GB10**, not the laptop. The project uses only
+**MOT17**, **CrowdHuman** and **JHU-Crowd++**:
 ```bash
 bash scripts/gb10_setup.sh                 # venv + ARM64 CUDA PyTorch + requirements
-python scripts/fetch_datasets.py all       # ETH/UCY, UCF-CC-50, MOT17 02/04/09 (only those, via
-                                           # HTTP range requests), UCF-QNRF, P2PNet weights
-python scripts/fetch_datasets.py manual    # where to get ShanghaiTech, JHU-Crowd++, NWPU
-bash scripts/run_gb10.sh                   # every benchmark, evaluation and the dense-model training
+python scripts/fetch_datasets.py mot17     # MOT17 02/04/09 only, via HTTP range requests
+python scripts/fetch_datasets.py crowdhuman jhu   # checks these are in place (licence-gated downloads)
+bash scripts/run_gb10.sh [measure|mot17|train|jhu|all]   # benchmarks, evaluation, dense-model training
 ```
-To adapt the dense model to your own footage, label 30–50 frames with
-`tools/annotate_points.py` (it pre-fills heads from the detector) into
-`dataset/kumbh_points/{train,test}`; `run_gb10.sh` includes them.
+CrowdHuman (crowdhuman.org) and JHU-Crowd++ (crowd-counting.com) need their
+licences accepted, so `fetch_datasets.py` only checks they are unpacked under
+`dataset/`. `run_gb10.sh train` trains the point model on CrowdHuman; `jhu`
+fine-tunes it on CrowdHuman + JHU-Crowd++ (`weights/p2pnet_crowd_jhu.pth`). To
+adapt it to your own footage, label 30–50 frames with `tools/annotate_points.py`
+(it pre-fills heads from the detector) into `dataset/kumbh_points/{train,test}`;
+`run_gb10.sh` includes them.
 
 ## 6. Layer map (report layers A–O)
 
