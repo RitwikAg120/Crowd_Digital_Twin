@@ -43,7 +43,7 @@ def prefill_fn(kind):
             return np.column_stack([(b[:, 0] + b[:, 2]) / 2, (b[:, 1] + b[:, 3]) / 2])
         return heads
     from dense import PointCounter
-    pc = PointCounter(kind)
+    pc = PointCounter(kind, enhance=True)
     return lambda img: pc(img)[0]
 
 

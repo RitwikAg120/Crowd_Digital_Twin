@@ -44,10 +44,16 @@ class ForecastParams:
     substeps:           int   = 4        # integration substeps per step
 
     # Who is walking: de-biased speed (see debiased_speed) above WALK_MIN_SPEED
-    walk_min_speed:     float = 0.25     # m/s
-    walk_ramp:          float = 0.2      # m/s over which "standing" blends into "walking"
-    walk_z_lo:          float = 2.5      # … and the speed is this many std devs above zero
-    walk_z_hi:          float = 3.5
+    walk_min_speed:     float = 0.3      # m/s
+    walk_ramp:          float = 0.25     # m/s over which "standing" blends into "walking"
+    # … and the speed is this many std devs above zero. The de-biased speed
+    # above already removes the noise bias, so this only has to reject the
+    # noise tail of a still crowd. Set high (2.5..3.5) it also gated genuine
+    # walkers measured noisily — distant people in MOT17-09, where the forecast
+    # then lost 2 m at 8 s to constant velocity (8.4 → 6.7, ≈ CV's 6.4). The
+    # slightly higher speed floor keeps a dense still crowd from drifting.
+    walk_z_lo:          float = 1.5
+    walk_z_hi:          float = 2.5
     max_speed:          float = 2.0      # m/s
     standing_dodge:     float = 0.1      # share of the avoidance force a standing person acts on
 

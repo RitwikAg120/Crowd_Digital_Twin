@@ -1,0 +1,11 @@
+{
+  "camera_height_m": 3.412,
+  "pitch_deg": 26.51,
+  "hfov_deg": 65.0,
+  "image_size": [
+    768,
+    432
+  ],
+  "source": "pedestrians",
+  "note": "camera \u2248 3.4 m high, tilted 27\u00b0 down (from 590 people, 65\u00b0 field of view assumed)"
+}

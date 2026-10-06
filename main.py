@@ -81,18 +81,34 @@ class Config:
 
     # Dense crowds: people seen only as heads. Heads (or head points) with no
     # body box become people; when many are, dense mode looks harder.
-    HEADS_AS_PEOPLE   = True
+    # People seen only as a head: "dense" = in dense mode only. In normal crowds
+    # their guessed whole-body boxes add no one the body detector misses on
+    # MOT17 and cost MOTA (held-out 02 / 04 / 09: 0.48 / 0.54 / 0.47 with them,
+    # 0.49 / 0.62 / 0.70 without). True = always, False = never.
+    HEADS_AS_PEOPLE   = "dense"
     HEAD_SIZE_M       = 0.25       # head box height: the ruler when calibrating from heads
     BODY_PER_HEAD     = 7.0        # body height in head heights, without a camera model
     DENSE_AUTO        = True       # switch dense mode on/off by itself
-    DENSE_MIN_HEADS   = 15         # on when ≥ this many heads have no body …
-    DENSE_HEAD_RATIO  = 0.5        # … and they are ≥ this share of the bodies
+    # A dense crowd is mostly heads: MOT17-02 (a busy street, ~30 people) shows
+    # 15–35 heads without a body against ~20 bodies; the Kumbh clips 120–450
+    # against 6–22. Off again below half of both.
+    DENSE_MIN_HEADS   = 40         # on when ≥ this many heads have no body …
+    DENSE_HEAD_RATIO  = 2.0        # … and they are ≥ this many times the bodies
     HBOX_IMGSZ_DENSE  = 2560       # head detector input in dense mode (3–10 px heads)
     HBOX_CONF_DENSE   = 0.15
-    DENSE_MODEL       = "weights/p2pnet_crowd.pth"   # head-point model (dense.py), used if present
+    # Head-point model (dense.py), used if present, best first: the Kumbh-adapted
+    # model (CrowdHuman + JHU-Crowd++ + labelled Kumbh frames), then the JHU one,
+    # then CrowdHuman-only. On the same gold JHU+CrowdHuman val, the Kumbh model
+    # beats the JHU one (overall MAE 8.7 vs 9.5, JHU counted 94% vs 89%).
+    DENSE_MODEL       = next((w for w in ("weights/p2pnet_crowd_kumbh.pth",
+                                          "weights/p2pnet_crowd_jhu.pth",
+                                          "weights/p2pnet_crowd.pth") if Path(w).exists()),
+                             "weights/p2pnet_crowd.pth")
     DENSE_THRESHOLD   = 0.5        # head score for a point
+    DENSE_ENHANCE     = True       # equalise contrast before the point model (fog, dusk)
     DENSE_EVERY       = 1          # run the point model every Nth processed frame in dense mode
     DENSE_PROBE_EVERY = 50         # with the point model: look for a dense crowd every Nth frame
+    HEAD_TRACK_SCALE  = 3.0        # heads are tracked as boxes this many head sizes wide
                                    # even when the head detector sees none (drone / overhead views)
     CALIB_MIN_HEADS   = 600        # head boxes to calibrate from, when bodies are too few
 
@@ -165,7 +181,8 @@ class Config:
     DISCREP_THR       = 5          # persons before flagging discrepancy
     CONF_BOOST_MAX    = 1.2        # cap on the occlusion confidence boost
 
-    # IoT simulator
+    # IoT gate counters (optional add-on; off = video-only fusion)
+    IOT_ENABLED       = False      # --iot (or --mqtt) turns the gate stream on
     IOT_NOISE_STD     = 2.0        # std-dev of the gate miscount (persons)
     IOT_ERR_DECAY     = 0.9        # AR(1) decay of the miscount — keeps it bounded
     IOT_OCCLUSION     = 1.15       # gates also count people the camera cannot see
@@ -781,7 +798,9 @@ class IoTSimulator:
 
     @property
     def mode(self) -> str:
-        return "live" if self.live else "simulated"
+        if self.live:
+            return "live"
+        return "simulated" if Config.IOT_ENABLED else "off"
 
     def tick(self, video_count: int, frame_idx: int) -> Tuple[int, int]:
         """Advance one pipeline frame; returns the (entry, exit) counts since the last tick."""
@@ -856,6 +875,23 @@ class DataFusionLayer:
           κ   = 1 − (|C_video − C_iot| / max(C_video, C_iot, 1))
         """
         video_count = len(video_detections)
+
+        # IoT switched off: video-only fusion, nothing to disagree with
+        if not (Config.IOT_ENABLED or self.iot.live):
+            result = {
+                "fused_detections":  [dict(d) for d in video_detections],
+                "fused_count":       float(video_count),
+                "video_count":       video_count,
+                "iot_count":         None,
+                "iot_entry_delta":   None,
+                "iot_exit_delta":    None,
+                "discrepancy":       0,
+                "discrepancy_flag":  False,
+                "conf_scale":        1.0,
+                "fusion_confidence": 1.0,
+            }
+            self._log.append(result)
+            return result
 
         # Stream 2: IoT tick
         entry, exit_ = self.iot.tick(video_count, frame_idx)
@@ -2009,10 +2045,17 @@ class TwinPipeline:
                 (det["x1"], det["y1"], det["x2"], det["y2"])
             )
 
+            # A person found only by their head = an orange head box: their
+            # whole-person box would cover the people in front of them
+            if "head" in det:
+                hx1, hy1, hx2, hy2 = map(int, det["head"])
+                cv2.rectangle(overlay, (hx1, hy1), (hx2, hy2), (0, 140, 255), 1)
+                continue
+
             label = f"#{det['id']} {det['confidence']:.2f}"
 
-            # Full-body box = yellow; a person found only by their head = orange
-            col = (0, 255, 255) if det.get("src", "body") == "body" else (0, 140, 255)
+            # Full-body box = yellow
+            col = (0, 255, 255)
 
             cv2.rectangle(
                 overlay,
@@ -2032,8 +2075,11 @@ class TwinPipeline:
                 1
             )
         # ── Draw HBOX detections ──────────────────────────────────────────
+        # Not when the head points count the heads (they'd be drawn twice), and
+        # without labels in a dense crowd, where they would cover the picture
+        points_used = any(d.get("src") == "point" for d in det_list)
 
-        for hbox in hbox_detections:
+        for hbox in (() if points_used else hbox_detections):
 
             x1, y1, x2, y2 = map(
                 int,
@@ -2050,8 +2096,10 @@ class TwinPipeline:
                 (x1, y1),
                 (x2, y2),
                 col,
-                2
+                1 if self.dense else 2
             )
+            if self.dense:
+                continue
 
             cv2.putText(
                 overlay,
@@ -2064,7 +2112,7 @@ class TwinPipeline:
             )
 
         for a in agents_now:
-            cv2.circle(overlay, (int(a.x), int(a.y)), 4, (0, 0, 255), -1)
+            cv2.circle(overlay, (int(a.x), int(a.y)), 2 if self.dense else 4, (0, 0, 255), -1)
 
         _, buf        = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 72])
         annotated_b64 = base64.b64encode(buf).decode()
@@ -2163,6 +2211,7 @@ class TwinPipeline:
                     "y2":    round(float(det["y2"]), 1),
                     "conf":  round(float(det["confidence"]), 3),
                     "zone":  det.get("zone", ""),
+                    "src":   det.get("src", "body"),
                 }
                 for det in det_list if "x1" in det
             ],
@@ -2297,7 +2346,7 @@ class ReplayPipeline(TwinPipeline):
 class CDTPipeline(TwinPipeline):
     """Live pipeline: video → YOLO26 body + head detection → ByteTrack → twin."""
 
-    def __init__(self, source=None, record_experience: bool = True):
+    def __init__(self, source=None, record_experience: bool = True, name: Optional[str] = None):
         # Detection needs PyTorch; the twin-only mode never imports it.
         # Keep Ultralytics off the network (update checks, telemetry); it reads
         # this once on import. Set YOLO_OFFLINE=0 to allow it.
@@ -2309,6 +2358,8 @@ class CDTPipeline(TwinPipeline):
 
         self.video  = VideoInputHandler(source) if source is not None else None
         self._name_source(source)
+        if name:                                 # e.g. evaluate.py, which reads frames itself
+            self.calib_name = name
         self._switch_lock = threading.Lock()     # held while a frame is processed
         self.device = resolve_device(Config.DEVICE)
         self.half   = Config.HALF and self.device != "cpu"
@@ -2351,7 +2402,8 @@ class CDTPipeline(TwinPipeline):
             from dense import PointCounter
             try:
                 self.points_model = PointCounter(Config.DENSE_MODEL, self.device,
-                                                 Config.DENSE_THRESHOLD, half=self.half)
+                                                 Config.DENSE_THRESHOLD, half=self.half,
+                                                 enhance=Config.DENSE_ENHANCE)
                 print(f"[CDT] Dense-crowd point model: {Config.DENSE_MODEL}")
             except Exception as e:
                 print(f"[CDT] Dense-crowd point model not loaded ({e}); using head boxes only.")
@@ -2359,6 +2411,8 @@ class CDTPipeline(TwinPipeline):
 
         self._hbox_last: List[dict] = []
         self._points_last = (np.zeros((0, 2)), np.zeros(0))
+        from dense import HeadScale
+        self.head_scale = HeadScale()            # head size by image row, for head points
         self.dense = False                       # dense mode: heads at high resolution + points
         self.camera_motion = CameraMotion()
         self.det_counts = {"bodies": 0, "heads": 0, "points": 0}
@@ -2394,6 +2448,7 @@ class CDTPipeline(TwinPipeline):
             self._proc_times.clear()
             self._hbox_last = []
             self._points_last = (np.zeros((0, 2)), np.zeros(0))
+            self.head_scale = type(self.head_scale)()
             self.dense = False
             self.camera_motion = CameraMotion()
             h, w = fit_within(*new.resolution, Config.FRAME_HEIGHT, Config.FRAME_WIDTH)
@@ -2487,6 +2542,7 @@ class CDTPipeline(TwinPipeline):
                 Config.HBOX_IMGSZ_DENSE if self.dense else Config.HBOX_IMGSZ,
             )
         hbox_detections = self._hbox_last
+        self.head_scale.add(hbox_detections)
 
         # Head points from the dense-crowd model (when loaded): every frame in
         # dense mode, else now and then as a probe — overhead and drone views
@@ -2502,12 +2558,14 @@ class CDTPipeline(TwinPipeline):
         # ── People with no body box: heads (or head points) ───────────────
         bodies = np.array([d["box"] for d in fbox_detections], np.float32).reshape(-1, 4)
         extra_heads, extra_conf, extra_src = self._unmatched_heads(
-            bodies, hbox_detections, self._points_last if use_points else None)
+            bodies, hbox_detections, self._points_last if use_points else None,
+            self.head_scale, crowd=self.dense)
         if Config.DENSE_AUTO:
-            n_x = len([h for h in hbox_detections
-                       if not self._inside_any(h["box"], bodies)])
+            hb = np.array([h["box"] for h in hbox_detections], np.float32).reshape(-1, 4)
+            n_x = int((~self._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, bodies)).sum())
             if use_points:                      # the point model sees heads the detector can't
-                n_x = max(n_x, int((np.array(extra_src) == "point").sum()))
+                # counted as outside a dense crowd, so dense mode can't keep itself on
+                n_x = max(n_x, int((~self._heads_of_bodies(self._points_last[0], bodies)).sum()))
             on  = n_x >= Config.DENSE_MIN_HEADS and n_x >= Config.DENSE_HEAD_RATIO * len(bodies)
             off = n_x < Config.DENSE_MIN_HEADS / 2 or n_x < 0.5 * Config.DENSE_HEAD_RATIO * len(bodies)
             if (on and not self.dense) or (off and self.dense):
@@ -2515,22 +2573,21 @@ class CDTPipeline(TwinPipeline):
                 print(f"[CDT] Dense mode {'on' if on else 'off'} ({n_x} heads without a body, "
                       f"{len(bodies)} bodies)")
 
-        # Heads become whole-person boxes: head on top, feet from the ground geometry
-        pseudo = np.zeros((0, 4), np.float32)
-        if len(extra_heads):
-            feet, body_h = self.zone_mgr.ground.feet_from_heads(extra_heads)
-            half_w = np.maximum((extra_heads[:, 2] - extra_heads[:, 0]) * 1.1, 2.0)
-            pseudo = np.column_stack([feet[:, 0] - half_w, extra_heads[:, 1],
-                                      feet[:, 0] + half_w, feet[:, 1]]).astype(np.float32)
+        # Heads become whole-person boxes: head on top, feet from the ground geometry.
+        # These boxes are what the twin measures and what the camera-motion
+        # estimate masks out, but in a dense crowd each one covers the heads of
+        # the people in front, so the tracker follows the heads themselves.
+        pseudo = self._person_boxes(extra_heads)
         n_b = len(bodies)
         xyxy = np.vstack([bodies, pseudo])
+        track_xyxy = np.vstack([bodies, self._scale_boxes(extra_heads, Config.HEAD_TRACK_SCALE)])
         conf = np.concatenate([[d["confidence"] for d in fbox_detections], extra_conf]).astype(np.float32)
         # The tracker only starts tracks from confident detections: heads passed
         # their own threshold, so they are tracked at a neutral confidence
         track_conf = conf.copy()
         track_conf[n_b:] = np.maximum(track_conf[n_b:], Config.YOLO_CONF + 0.2)
         src = np.array(["body"] * n_b + list(extra_src))
-        dets = self._sv.Detections(xyxy=xyxy.reshape(-1, 4), confidence=track_conf,
+        dets = self._sv.Detections(xyxy=track_xyxy.reshape(-1, 4), confidence=track_conf,
                                    class_id=np.where(src == "body", 0, 1).astype(int),
                                    data={"src": src, "conf": conf})
         self.det_counts = {"bodies": n_b, "heads": int((src == "head").sum()),
@@ -2541,11 +2598,15 @@ class CDTPipeline(TwinPipeline):
 
         det_list = []
         if tracked.tracker_id is not None and len(tracked):
-            for (x1, y1, x2, y2), tid, c, s in zip(
-                tracked.xyxy.astype(float), tracked.tracker_id,
-                tracked.data["conf"], tracked.data["src"]
-            ):
-                det_list.append({
+            boxes = tracked.xyxy.astype(np.float32)
+            is_head = tracked.data["src"] != "body"
+            heads = self._scale_boxes(boxes[is_head], 1.0 / Config.HEAD_TRACK_SCALE)
+            boxes[is_head] = self._person_boxes(heads)
+            head_of = dict(zip(np.flatnonzero(is_head), heads))
+            for k, ((x1, y1, x2, y2), tid, c, s) in enumerate(zip(
+                boxes.astype(float), tracked.tracker_id, tracked.data["conf"], tracked.data["src"]
+            )):
+                det = {
                     "id":         int(tid),
                     "x1":         x1,
                     "y1":         y1,
@@ -2557,7 +2618,10 @@ class CDTPipeline(TwinPipeline):
                     "src":        str(s),
                     # Feet guessed from a head are less certain than a body box's
                     "noise_scale": 1.0 if s == "body" else 1.5,
-                })
+                }
+                if k in head_of:
+                    det["head"] = head_of[k].tolist()
+                det_list.append(det)
 
         # ── Camera motion: measure people against the ground, not the image ──
         to_ref = None
@@ -2576,33 +2640,99 @@ class CDTPipeline(TwinPipeline):
         )
 
     @staticmethod
-    def _inside_any(box, bodies: np.ndarray) -> bool:
-        """Is the centre of `box` inside any body box (the same person)?"""
-        if not len(bodies):
-            return False
-        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-        return bool(((bodies[:, 0] <= cx) & (cx <= bodies[:, 2]) &
-                     (bodies[:, 1] <= cy) & (cy <= bodies[:, 3])).any())
+    def _heads_of_bodies(centres, bodies: np.ndarray, crowd: bool = False) -> np.ndarray:
+        """
+        Which heads (centres, (N, 2)) belong to a body box — the same person,
+        not someone to add. Each body owns at most one head: the one nearest
+        where its head should be (top centre), within its width and from a
+        little above its top (heads poke out of the box) to 30% down. In a
+        dense crowd (`crowd`) the other heads are other people, even inside a
+        body box: someone standing behind. Elsewhere a head inside a body box
+        is that person's (keeping them cost MOT17-02 half its MOTA: 0.55 → 0.29).
+        Returns a boolean mask.
+        """
+        c = np.asarray(centres, float).reshape(-1, 2)
+        owned = np.zeros(len(c), bool)
+        b = np.asarray(bodies, float).reshape(-1, 4)
+        if not len(c) or not len(b):
+            return owned
+        if not crowd:
+            owned |= ((b[None, :, 0] <= c[:, None, 0]) & (c[:, None, 0] <= b[None, :, 2]) &
+                      (b[None, :, 1] <= c[:, None, 1]) & (c[:, None, 1] <= b[None, :, 3])).any(axis=1)
+        from scipy.optimize import linear_sum_assignment
+        bw, bh = b[:, 2] - b[:, 0], b[:, 3] - b[:, 1]
+        hx, hy = (b[:, 0] + b[:, 2]) / 2, b[:, 1] + 0.08 * bh           # where the head should be
+        dx = (c[None, :, 0] - hx[:, None]) / (0.5 * bw[:, None] + 1e-6)
+        dy = (c[None, :, 1] - hy[:, None]) / (0.22 * bh[:, None] + 1e-6)
+        ok = (np.abs(dx) <= 1) & (c[None, :, 1] >= b[:, 1, None] - 0.15 * bh[:, None]) & \
+             (c[None, :, 1] <= b[:, 1, None] + 0.3 * bh[:, None])
+        cost = np.where(ok, dx ** 2 + dy ** 2, 1e6)
+        rows, cols = linear_sum_assignment(cost)
+        owned[cols[cost[rows, cols] < 1e6]] = True
+        return owned
 
-    def _unmatched_heads(self, bodies: np.ndarray, heads: List[dict], points=None):
+    @staticmethod
+    def _merge_points(pts: np.ndarray, scores: np.ndarray, size: np.ndarray) -> np.ndarray:
+        """
+        Indices of head points kept after merging points on the same head: the
+        point model's rare doubles sit within a few pixels, while neighbours
+        in a dense crowd can be only half a head apart, so the radius is small.
+        """
+        order = np.argsort(-np.asarray(scores))
+        tree, keep, dropped = cKDTree(pts), [], np.zeros(len(pts), bool)
+        for i in order:
+            if dropped[i]:
+                continue
+            keep.append(i)
+            dropped[tree.query_ball_point(pts[i], min(0.35 * size[i], 4.0))] = True
+        return np.sort(np.array(keep, int))
+
+    @staticmethod
+    def _scale_boxes(boxes, k: float) -> np.ndarray:
+        """Boxes (N, 4) scaled k times about their centres."""
+        b = np.asarray(boxes, np.float32).reshape(-1, 4)
+        c, half = (b[:, :2] + b[:, 2:]) / 2, (b[:, 2:] - b[:, :2]) / 2 * k
+        return np.hstack([c - half, c + half])
+
+    def _person_boxes(self, heads) -> np.ndarray:
+        """Whole-person boxes for head boxes: from the top of the head to the feet."""
+        heads = np.asarray(heads, np.float32).reshape(-1, 4)
+        if not len(heads):
+            return np.zeros((0, 4), np.float32)
+        feet, _ = self.zone_mgr.ground.feet_from_heads(heads)
+        half_w = np.maximum((heads[:, 2] - heads[:, 0]) * 1.1, 2.0)
+        return np.column_stack([feet[:, 0] - half_w, heads[:, 1],
+                                feet[:, 0] + half_w, feet[:, 1]]).astype(np.float32)
+
+    def _unmatched_heads(self, bodies: np.ndarray, heads: List[dict], points=None,
+                         head_scale=None, crowd: bool = False):
         """
         Heads of people the body detector missed, as head boxes (N, 4), their
         confidences and where they came from ("head" / "point"). With head
         points (dense model) the points are used — they find far more heads —
-        each given a head box sized by how close its neighbours are.
+        each given a head box sized for its row by `head_scale` (dense.HeadScale,
+        learned from the head detector), else by how close its neighbours are.
+        Points on the same head are merged (when head sizes are known), and
+        each body box claims its own head (_heads_of_bodies), so nobody is
+        counted twice.
         """
-        if not Config.HEADS_AS_PEOPLE:
+        if not Config.HEADS_AS_PEOPLE or (Config.HEADS_AS_PEOPLE == "dense" and not crowd):
             return np.zeros((0, 4), np.float32), np.zeros(0), []
         if points is not None and len(points[0]):
             from dense import head_sizes
-            pts, sc = points
-            s = head_sizes(pts) / 2
+            pts, sc = np.asarray(points[0], float), np.asarray(points[1], float)
+            size = head_scale.predict(pts[:, 1]) if head_scale is not None else None
+            if size is not None:
+                m = self._merge_points(pts, sc, size)
+                pts, sc, size = pts[m], sc[m], size[m]
+            s = (size if size is not None else head_sizes(pts)) / 2
             boxes = np.column_stack([pts[:, 0] - s, pts[:, 1] - s, pts[:, 0] + s, pts[:, 1] + s])
-            keep = [i for i, b in enumerate(boxes) if not self._inside_any(b, bodies)]
-            return boxes[keep].astype(np.float32), sc[keep], ["point"] * len(keep)
-        keep = [h for h in heads if not self._inside_any(h["box"], bodies)]
-        return (np.array([h["box"] for h in keep], np.float32).reshape(-1, 4),
-                np.array([h["confidence"] for h in keep], float), ["head"] * len(keep))
+            keep = ~self._heads_of_bodies(pts, bodies, crowd)
+            return boxes[keep].astype(np.float32), sc[keep], ["point"] * int(keep.sum())
+        hb = np.array([h["box"] for h in heads], np.float32).reshape(-1, 4)
+        keep = ~self._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, bodies, crowd)
+        return (hb[keep], np.array([h["confidence"] for h in heads], float).reshape(-1)[keep],
+                ["head"] * int(keep.sum()))
 
     def stop(self):
         super().stop()
@@ -3051,6 +3181,8 @@ async def iot_counts(body: dict = Body(...), x_iot_token: Optional[str] = Header
     """
     if Config.IOT_TOKEN and x_iot_token != Config.IOT_TOKEN:
         raise HTTPException(401, "Missing or wrong X-IoT-Token")
+    if not Config.IOT_ENABLED:
+        raise HTTPException(409, "IoT gates are switched off (start the server with --iot)")
     if pipeline is None:
         raise HTTPException(503, "Pipeline not started")
     try:
@@ -3127,8 +3259,11 @@ if __name__ == "__main__":
     parser.add_argument("--head", metavar="WEIGHTS", help=f"head detector (default {Config.HBOX_MODEL})")
     parser.add_argument("--dense-model", metavar="WEIGHTS",
                         help=f"dense-crowd point model (default {Config.DENSE_MODEL}, if present)")
+    parser.add_argument("--iot", action="store_true",
+                        help="enable IoT gate counters (simulated until real counts arrive "
+                             "on POST /api/iot or MQTT); off = video-only fusion")
     parser.add_argument("--mqtt", metavar="HOST[:PORT]",
-                        help="MQTT broker with gate-counter messages (see iot.py)")
+                        help="MQTT broker with gate-counter messages (see iot.py); implies --iot")
     parser.add_argument("--mqtt-topic", default="cdt/gates/#")
     parser.add_argument("--iot-token", help="require this X-IoT-Token on POST /api/iot")
     args = parser.parse_args()
@@ -3139,6 +3274,7 @@ if __name__ == "__main__":
     Config.SCENE_WIDTH_M    = args.scene_width_m
     Config.SCENE_HEIGHT_M   = args.scene_height_m
     Config.IOT_TOKEN        = args.iot_token or Config.IOT_TOKEN
+    Config.IOT_ENABLED      = bool(args.iot or args.mqtt) or Config.IOT_ENABLED
     Config.YOLO_MODEL       = args.body or Config.YOLO_MODEL
     Config.HBOX_MODEL       = args.head or Config.HBOX_MODEL
     Config.DENSE_MODEL      = args.dense_model or Config.DENSE_MODEL

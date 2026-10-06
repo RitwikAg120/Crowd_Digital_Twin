@@ -4,17 +4,27 @@ Train the dense-crowd head-point model (dense.P2PNet) — run this on the GB10.
     python train_dense.py --data crowdhuman:dataset/CrowdHuman \\
                           --init imagenet --epochs 100 --amp --out weights/p2pnet_crowd.pth
 
+    # dense crowds in fog, rain and from high up: fine-tune on JHU-Crowd++ too
+    python train_dense.py --data crowdhuman:dataset/CrowdHuman --data jhu:dataset/JHU-Crowd@4 \\
+                          --init weights/p2pnet_crowd.pth --lr 5e-5 --lr-backbone 5e-6 \\
+                          --epochs 60 --amp --out weights/p2pnet_crowd_jhu.pth
+
     # then fine-tune on your own annotated frames (points format)
     python train_dense.py --data points:dataset/kumbh_points --init weights/p2pnet_crowd.pth \\
                           --epochs 60 --lr 5e-5 --out weights/p2pnet_crowd_kumbh.pth
 
-Datasets (--data kind:path, repeatable; train on their train split, validate
-on val/test):
+Datasets (--data kind:path[@N], repeatable; train on their train split, N
+times over with @N so a small set isn't swamped, and validate on val/test —
+an equal share of --val-max from each dataset):
   crowdhuman  CrowdHuman folder: annotation_train.odgt, annotation_val.odgt and the
               images (anywhere below it, e.g. Images/). Every person's head box
               (hbox) centre is a head point; "mask" regions (unlabelled crowds) and
               heads marked ignore are blanked out, so the model isn't taught that
               people there are background.
+  jhu         JHU-Crowd++ v2.0 folder (jhu-crowd.net): {train,val,test}/images/*.jpg and
+              gt/*.txt, one "x y w h occlusion blur" line per head; 4,372 dense crowd
+              images (up to 25,000 people) labelled by weather — fog/haze, rain, snow —
+              and scene, from street level to high above. Validation is its val split.
   points      your own: {train,test}/<name>.jpg + <name>.txt with one "x y" head point
               per line (tools/annotate_points.py writes these)
 
@@ -90,6 +100,27 @@ def crowdhuman_samples(root: Path, split: str):
     return out
 
 
+def jhu_samples(root: Path, split: str):
+    """
+    JHU-Crowd++ v2.0: [(image, (N, 2) head points, [])]. The split folder
+    (train, or val for validation) may sit below `root` (the zip unpacks to
+    jhu_crowd_v2.0/).
+    """
+    name = "train" if split == "train" else "val"
+    d = next(iter(sorted(p for p in root.rglob(name) if (p / "images").is_dir() and (p / "gt").is_dir())),
+             None)
+    if d is None:
+        return []
+    out = []
+    for img in sorted(p for p in (d / "images").glob("*") if p.suffix.lower() in IMG_EXT):
+        txt = d / "gt" / f"{img.stem}.txt"
+        pts = np.zeros((0, 2))
+        if txt.exists() and txt.stat().st_size:
+            pts = np.loadtxt(txt, ndmin=2)[:, :2]
+        out.append((img, pts, []))
+    return out
+
+
 def list_samples(kind: str, root: str, split: str):
     """
     [(image path, (N, 2) head points, [ignore boxes])] for one dataset split
@@ -98,6 +129,8 @@ def list_samples(kind: str, root: str, split: str):
     r = Path(root)
     if kind == "crowdhuman":
         return crowdhuman_samples(r, split)
+    if kind == "jhu":
+        return jhu_samples(r, split)
     if kind == "points":
         d = r / ("train" if split == "train" else "test")
         out = []
@@ -106,7 +139,7 @@ def list_samples(kind: str, root: str, split: str):
             pts = np.loadtxt(txt, ndmin=2)[:, :2] if txt.exists() and txt.stat().st_size else np.zeros((0, 2))
             out.append((img, pts, []))
         return out
-    raise SystemExit(f"Unknown dataset kind {kind!r} (use crowdhuman or points)")
+    raise SystemExit(f"Unknown dataset kind {kind!r} (use crowdhuman, jhu or points)")
 
 
 def load_image(path, pts, max_side: int, ignore=()):
@@ -240,6 +273,11 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--lr-backbone", type=float, default=1e-5)
     ap.add_argument("--val-every", type=int, default=5)
+    ap.add_argument("--patience", type=int, default=0,
+                    help="stop after N validations without a better MAE (0 = never); "
+                         "use with --val-every 1 to mean N epochs")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from <out>.last.pth (saved after every epoch)")
     ap.add_argument("--val-max", type=int, default=0, help="validate on at most N images (0 = all)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -251,17 +289,22 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    train, val = [], []
+    train, vals = [], []
     for spec in args.data:
         kind, root = spec.split(":", 1)
+        root, _, times = root.partition("@")
         tr, te = list_samples(kind, root, "train"), list_samples(kind, root, "test")
-        print(f"  {kind}: {len(tr)} train / {len(te)} validation images from {root}")
-        train += tr
-        val += te
+        print(f"  {kind}: {len(tr)} train{f' (× {times})' if times else ''} / "
+              f"{len(te)} validation images from {root}")
+        train += tr * int(times or 1)
+        vals.append(te)
     if not train:
         raise SystemExit("No training images found.")
-    if args.val_max and len(val) > args.val_max:
-        val = random.sample(val, args.val_max)
+    # The same fixed validation images every epoch, an equal share from each dataset
+    val = []
+    for te in vals:
+        k = args.val_max // max(1, sum(bool(v) for v in vals)) if args.val_max else len(te)
+        val += random.sample(te, k) if len(te) > k else te
 
     model = build_model(args.init, args.device)
     backbone = [p for n, p in model.named_parameters() if n.startswith("backbone.")]
@@ -275,9 +318,18 @@ def main():
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     amp = args.amp and args.device.startswith("cuda")
-    best, step, log = math.inf, 0, []
+    best, step, log, stale, start = math.inf, 0, [], 0, 1
+    last_path = out.with_suffix(".last.pth")
+    if args.resume and last_path.exists():
+        st = torch.load(str(last_path), map_location=args.device, weights_only=True)
+        model.load_state_dict(st["model"])
+        opt.load_state_dict(st["opt"])
+        best, stale, start = st["best"], st["stale"], st["epoch"] + 1
+        log = json.loads(out.with_suffix(".log.json").read_text()) if out.with_suffix(".log.json").exists() else []
+        print(f"  resuming after epoch {st['epoch']} (best MAE {best:.1f}, {stale} without improvement)")
     t0 = time.time()
-    for epoch in range(1, args.epochs + 1):
+    epoch = start - 1
+    for epoch in range(start, args.epochs + 1):
         model.train()
         losses = []
         for x, targets in loader:
@@ -301,11 +353,21 @@ def main():
             msg += f" | val MAE {mae:.1f} RMSE {rmse:.1f}"
             log.append({"epoch": epoch, "mae": mae, "rmse": rmse, "loss": float(l[0])})
             if mae < best:
-                best = mae
+                best, stale = mae, 0
                 torch.save({"model": model.state_dict(), "row": 2, "epoch": epoch, "mae": mae,
                             "rmse": rmse, "data": args.data}, out)
                 msg += "  → saved"
+            else:
+                stale += 1
+                msg += f"  (no improvement: {stale}/{args.patience or '∞'})"
+            out.with_suffix(".log.json").write_text(json.dumps(log, indent=2))
         print(msg, flush=True)
+        # Everything needed to resume after this epoch
+        torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "epoch": epoch,
+                    "best": best, "stale": stale}, last_path)
+        if args.patience and stale >= args.patience:
+            print(f"Stopping early: validation MAE hasn't improved for {stale} checks.", flush=True)
+            break
         if last:
             break
     if not val:

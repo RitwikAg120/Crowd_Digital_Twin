@@ -147,20 +147,32 @@ def load_p2pnet(path, device: str = "cpu") -> "P2PNet":
     return model.to(device).eval()
 
 
+def enhance_contrast(frame_bgr: np.ndarray, clip: float = 2.0) -> np.ndarray:
+    """Local contrast equalisation (CLAHE) of the lightness: heads in fog and at dusk stand out."""
+    import cv2
+    lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+    lab[:, :, 0] = cv2.createCLAHE(clip, (8, 8)).apply(lab[:, :, 0])
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
 class PointCounter:
     """
-    Heads in a frame as points: the image is scaled so its width is at least
-    MIN_WIDTH (small, distant heads get enough pixels), padded to a multiple
-    of 128, normalised like ImageNet, and every anchor with a head score ≥
-    threshold is a head. Returns (N, 2) points in frame pixels and scores.
+    Heads in a frame as points: the image is scaled up only if narrower than
+    min_width (0 = never: upscaling a low-quality video only blurs its heads,
+    and on the Kumbh clips found fewer of them), padded to a multiple of 128,
+    normalised like ImageNet, and every anchor with a head score ≥ threshold
+    is a head. With `enhance`, the frame's contrast is equalised first (more
+    heads found in fog and poor light). Returns (N, 2) points in frame pixels
+    and scores.
     """
     MEAN = np.array([0.485, 0.456, 0.406], np.float32)
     STD  = np.array([0.229, 0.224, 0.225], np.float32)
 
     def __init__(self, weights, device: str = "cpu", threshold: float = 0.5,
-                 min_width: int = 1280, max_side: int = 2560, half: bool = False):
+                 min_width: int = 0, max_side: int = 2560, half: bool = False,
+                 enhance: bool = False):
         self.model = load_p2pnet(weights, device)
-        self.device, self.threshold = device, threshold
+        self.device, self.threshold, self.enhance = device, threshold, enhance
         self.min_width, self.max_side = min_width, max_side
         self.half = half and str(device).startswith("cuda")
         if self.half:
@@ -169,6 +181,8 @@ class PointCounter:
 
     def __call__(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         import cv2
+        if self.enhance:
+            frame_bgr = enhance_contrast(frame_bgr)
         h, w = frame_bgr.shape[:2]
         s = max(1.0, self.min_width / w)
         s = min(s, self.max_side / max(h, w))
@@ -201,3 +215,52 @@ def head_sizes(points: np.ndarray, k: int = 3, lo: float = 4.0, hi: float = 60.0
         return np.full(len(p), 16.0)
     d, _ = cKDTree(p).query(p, k=min(k + 1, len(p)))
     return np.clip(d[:, 1:].mean(axis=1) * 0.8, lo, hi)
+
+
+class HeadScale:
+    """
+    Head size (px) by image row, learned from the head detector's boxes. On a
+    ground plane seen in perspective a head's size grows linearly with its
+    row, so a robust line through (row, size) of recent head boxes sizes the
+    head points of the same scene far better than their spacing does (the
+    spacing is large wherever the point model misses heads, which gave huge
+    boxes). predict() returns None until enough heads are seen.
+    """
+    def __init__(self, keep: int = 3000, min_heads: int = 40, lo: float = 3.0, hi: float = 80.0):
+        from collections import deque
+        self._y, self._s = deque(maxlen=keep), deque(maxlen=keep)
+        self.min_heads, self.lo, self.hi = min_heads, lo, hi
+        self._fit = None
+        self._new = 0
+
+    def add(self, heads, min_conf: float = 0.3):
+        """Head detections [{"box": [x1, y1, x2, y2], "confidence": c}, ...]."""
+        for hd in heads:
+            x1, y1, x2, y2 = hd["box"]
+            w, h = x2 - x1, y2 - y1
+            if hd.get("confidence", 1.0) >= min_conf and w > 0 and 0.6 <= h / w <= 2.0:
+                self._y.append((y1 + y2) / 2)
+                self._s.append(float(np.sqrt(w * h)))
+                self._new += 1
+        if self._new >= 50 or (self._fit is None and len(self._y) >= self.min_heads):
+            self._refit()
+
+    def _refit(self):
+        self._new = 0
+        y, s = np.asarray(self._y, float), np.asarray(self._s, float)
+        if len(y) < self.min_heads or np.ptp(y) < 1:
+            return
+        keep = np.ones(len(y), bool)
+        for _ in range(3):                       # trim heads far off the line (hands, false hits)
+            a, b = np.polyfit(y[keep], s[keep], 1)
+            r = s - (a * y + b)
+            mad = np.median(np.abs(r[keep])) + 1e-6
+            keep = np.abs(r) <= 3 * 1.4826 * mad
+        # A head never shrinks towards the camera: a negative slope is noise
+        self._fit = (max(a, 0.0), b if a >= 0 else float(np.median(s[keep])))
+
+    def predict(self, rows) -> "Optional[np.ndarray]":
+        if self._fit is None:
+            return None
+        a, b = self._fit
+        return np.clip(a * np.asarray(rows, float) + b, self.lo, self.hi)

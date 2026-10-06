@@ -571,7 +571,7 @@ function update(d){
   const fOk=(d.fusion?.confidence??0)>=0.70;
   const nfuEl=document.getElementById('nfr-fusion');
   if(nfuEl){nfuEl.textContent=fOk?'Pass':'Low';nfuEl.className=fOk?'nfr-pass':'nfr-fail'}
-  setText('nfr-iot',d.fusion?.iot_mode==='live'?'Live':'Simulated');
+  setText('nfr-iot',{live:'Live',simulated:'Simulated',off:'Off'}[d.fusion?.iot_mode]??'—');
   badge('bd-fps',`FPS ${d.fps}`,!!nfr.fps_pass);
   badge('bd-lat',`${Math.round(d.latency_ms)} ms`,!!nfr.latency_pass);
   const replay=d.mode==='replay';
