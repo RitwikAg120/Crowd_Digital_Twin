@@ -181,7 +181,8 @@ class Config:
     DISCREP_THR       = 5          # persons before flagging discrepancy
     CONF_BOOST_MAX    = 1.2        # cap on the occlusion confidence boost
 
-    # IoT simulator
+    # IoT gate counters (optional add-on; off = video-only fusion)
+    IOT_ENABLED       = False      # --iot (or --mqtt) turns the gate stream on
     IOT_NOISE_STD     = 2.0        # std-dev of the gate miscount (persons)
     IOT_ERR_DECAY     = 0.9        # AR(1) decay of the miscount — keeps it bounded
     IOT_OCCLUSION     = 1.15       # gates also count people the camera cannot see
@@ -797,7 +798,9 @@ class IoTSimulator:
 
     @property
     def mode(self) -> str:
-        return "live" if self.live else "simulated"
+        if self.live:
+            return "live"
+        return "simulated" if Config.IOT_ENABLED else "off"
 
     def tick(self, video_count: int, frame_idx: int) -> Tuple[int, int]:
         """Advance one pipeline frame; returns the (entry, exit) counts since the last tick."""
@@ -872,6 +875,23 @@ class DataFusionLayer:
           κ   = 1 − (|C_video − C_iot| / max(C_video, C_iot, 1))
         """
         video_count = len(video_detections)
+
+        # IoT switched off: video-only fusion, nothing to disagree with
+        if not (Config.IOT_ENABLED or self.iot.live):
+            result = {
+                "fused_detections":  [dict(d) for d in video_detections],
+                "fused_count":       float(video_count),
+                "video_count":       video_count,
+                "iot_count":         None,
+                "iot_entry_delta":   None,
+                "iot_exit_delta":    None,
+                "discrepancy":       0,
+                "discrepancy_flag":  False,
+                "conf_scale":        1.0,
+                "fusion_confidence": 1.0,
+            }
+            self._log.append(result)
+            return result
 
         # Stream 2: IoT tick
         entry, exit_ = self.iot.tick(video_count, frame_idx)
@@ -3161,6 +3181,8 @@ async def iot_counts(body: dict = Body(...), x_iot_token: Optional[str] = Header
     """
     if Config.IOT_TOKEN and x_iot_token != Config.IOT_TOKEN:
         raise HTTPException(401, "Missing or wrong X-IoT-Token")
+    if not Config.IOT_ENABLED:
+        raise HTTPException(409, "IoT gates are switched off (start the server with --iot)")
     if pipeline is None:
         raise HTTPException(503, "Pipeline not started")
     try:
@@ -3237,8 +3259,11 @@ if __name__ == "__main__":
     parser.add_argument("--head", metavar="WEIGHTS", help=f"head detector (default {Config.HBOX_MODEL})")
     parser.add_argument("--dense-model", metavar="WEIGHTS",
                         help=f"dense-crowd point model (default {Config.DENSE_MODEL}, if present)")
+    parser.add_argument("--iot", action="store_true",
+                        help="enable IoT gate counters (simulated until real counts arrive "
+                             "on POST /api/iot or MQTT); off = video-only fusion")
     parser.add_argument("--mqtt", metavar="HOST[:PORT]",
-                        help="MQTT broker with gate-counter messages (see iot.py)")
+                        help="MQTT broker with gate-counter messages (see iot.py); implies --iot")
     parser.add_argument("--mqtt-topic", default="cdt/gates/#")
     parser.add_argument("--iot-token", help="require this X-IoT-Token on POST /api/iot")
     args = parser.parse_args()
@@ -3249,6 +3274,7 @@ if __name__ == "__main__":
     Config.SCENE_WIDTH_M    = args.scene_width_m
     Config.SCENE_HEIGHT_M   = args.scene_height_m
     Config.IOT_TOKEN        = args.iot_token or Config.IOT_TOKEN
+    Config.IOT_ENABLED      = bool(args.iot or args.mqtt) or Config.IOT_ENABLED
     Config.YOLO_MODEL       = args.body or Config.YOLO_MODEL
     Config.HBOX_MODEL       = args.head or Config.HBOX_MODEL
     Config.DENSE_MODEL      = args.dense_model or Config.DENSE_MODEL

@@ -41,31 +41,44 @@ def test_parse_counts():
         raise AssertionError(f"accepted {bad!r}")
 
 
-def test_iot_endpoint_switches_fusion_to_real_gates():
+def test_iot_off_by_default_is_video_only():
     c, p = _client()
-    assert p.fusion.iot.mode == "simulated"
-    r = c.post("/api/iot", json={"entry": 5, "exit": 2})
-    assert r.status_code == 200 and r.json()["mode"] == "live", r.text
-    assert p.fusion.iot.net_count == 3
-    assert c.post("/api/iot", json={"entry": "lots"}).status_code == 422
-    return f"gates live, net {p.fusion.iot.net_count}"
+    assert p.fusion.iot.mode == "off"
+    f = p.fusion._log[-1]
+    assert f["iot_count"] is None and f["fused_count"] == f["video_count"] and f["fusion_confidence"] == 1.0
+    assert c.post("/api/iot", json={"entry": 5, "exit": 2}).status_code == 409
+    return "video-only fusion, /api/iot refused"
+
+
+def test_iot_endpoint_switches_fusion_to_real_gates():
+    Config.IOT_ENABLED = True
+    try:
+        c, p = _client()
+        assert p.fusion.iot.mode == "simulated"
+        r = c.post("/api/iot", json={"entry": 5, "exit": 2})
+        assert r.status_code == 200 and r.json()["mode"] == "live", r.text
+        assert p.fusion.iot.net_count == 3
+        assert c.post("/api/iot", json={"entry": "lots"}).status_code == 422
+        return f"gates live, net {p.fusion.iot.net_count}"
+    finally:
+        Config.IOT_ENABLED = False
 
 
 def test_iot_token():
     c, p = _client()
-    Config.IOT_TOKEN = "s3cret"
+    Config.IOT_TOKEN, Config.IOT_ENABLED = "s3cret", True
     try:
         assert c.post("/api/iot", json={"entry": 1, "exit": 0}).status_code == 401
         assert c.post("/api/iot", json={"entry": 1, "exit": 0},
                       headers={"X-IoT-Token": "s3cret"}).status_code == 200
     finally:
-        Config.IOT_TOKEN = None
+        Config.IOT_TOKEN, Config.IOT_ENABLED = None, False
 
 
 def test_health_and_sources_in_twin_only_mode():
     c, p = _client()
     h = c.get("/api/health").json()
-    assert h["status"] == "ok" and h["people"] == 30 and h["iot"] == "simulated", h
+    assert h["status"] == "ok" and h["people"] == 30 and h["iot"] == "off", h
     s = c.get("/api/sources").json()
     assert s["switchable"] is False
     assert c.post("/api/source", json={"name": "demo.mp4"}).status_code == 409
