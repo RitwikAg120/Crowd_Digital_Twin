@@ -3209,7 +3209,7 @@ async def cameras_info():
     for cid, p in cams.items():
         d = p.latest_payload or {}
         out.append({"id": cid, "source": p.source_name, "on_air": p is pipeline,
-                    "people": d.get("n_agents"), "risk": (d.get("risk") or {}).get("risk_label"),
+                    "people": d.get("n_agents"), "risk": d.get("risk_label"),
                     "fps": d.get("fps"), "dense": p.dense})
     return {"cameras": out, "site": site is not None}
 
