@@ -26,7 +26,7 @@ an equal share of --val-max from each dataset):
               images (up to 25,000 people) labelled by weather — fog/haze, rain, snow —
               and scene, from street level to high above. Validation is its val split.
   points      your own: {train,test}/<name>.jpg + <name>.txt with one "x y" head point
-              per line (tools/annotate_points.py writes these)
+              per line
 
 Init: "imagenet" (VGG16-BN ImageNet weights, downloaded by torchvision),
 "none" (random, for smoke tests), or a checkpoint path (a previous run). The
