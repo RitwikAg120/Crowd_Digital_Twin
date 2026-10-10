@@ -129,5 +129,25 @@ def test_live_stream_reconnects():
     return "stream reopened after it stopped delivering frames"
 
 
+def test_mqtt_gate_messages_reach_the_fusion():
+    """A gate counter publishing over MQTT (handler only: no broker needed)."""
+    from types import SimpleNamespace
+    from iot import MQTTGates
+    Config.IOT_ENABLED = True
+    try:
+        c, p = _client()
+        g = MQTTGates.__new__(MQTTGates)              # skip connecting to a broker
+        g.on_counts, g.received, g.rejected = p.fusion.iot.push_real, 0, 0
+        for payload in (b'{"entry": 4, "exit": 1}', b"2,0", b"garbage", b'{"entry": -3}'):
+            g._on_message(None, None, SimpleNamespace(payload=payload, topic="cdt/gates/north"))
+        assert (g.received, g.rejected) == (2, 2)
+        assert p.fusion.iot.mode == "live" and p.fusion.iot.net_count == 5
+        f = p.fusion.fuse([{"id": 1, "confidence": .9}] * 5, 99)
+        assert f["iot_count"] == 5 and f["fusion_confidence"] == 1.0, f
+        return "2 messages counted, 2 rejected"
+    finally:
+        Config.IOT_ENABLED = False
+
+
 if __name__ == "__main__":
     runner.run(dict(globals()))

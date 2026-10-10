@@ -54,6 +54,7 @@ from scipy.stats import linregress
 from experience.experience_buffer import ExperienceBuffer
 # Gate counters (Stream 2) over HTTP / MQTT
 from iot import MQTTGates, parse_counts
+from multicam import SiteFusion
 # Camera-motion compensation (handheld / panning footage)
 from stabilize import CameraMotion, apply as apply_transform
 # Motion state and the 20 s forecast (Layer K)
@@ -107,6 +108,9 @@ class Config:
     DENSE_THRESHOLD   = 0.5        # head score for a point
     DENSE_ENHANCE     = True       # equalise contrast before the point model (fog, dusk)
     DENSE_EVERY       = 1          # run the point model every Nth processed frame in dense mode
+    DENSE_ALTERNATE   = True       # dense mode: 2560 px heads on even frames, head points on odd
+                                   # ones (each reuses the other's last result) — ~1 heavy model less
+                                   # per frame; packed crowds move only a few px between frames
     DENSE_PROBE_EVERY = 50         # with the point model: look for a dense crowd every Nth frame
     HEAD_TRACK_SCALE  = 3.0        # heads are tracked as boxes this many head sizes wide
                                    # even when the head detector sees none (drone / overhead views)
@@ -1376,8 +1380,8 @@ class TrendPredictor:
             trend = "STABLE"
         return {
             "crowd_trend": trend,
-            "slope":       round(float(sl), 4),
-            "r2":          round(float(r ** 2), 3),
+            "slope":       round(float(sl), 4) if np.isfinite(sl) else 0.0,
+            "r2":          round(float(r ** 2), 3) if np.isfinite(r) else 0.0,   # constant counts
         }
 
 
@@ -1864,6 +1868,8 @@ class TwinPipeline:
         self._running        = False
         self.latest_payload: Optional[dict] = None
         self.latest_frame: Optional[np.ndarray] = None   # raw frame, for the 3D twin's floor
+        self.on_air = True                       # multi-camera: only the selected one broadcasts
+        self.camera_id = "cam1"
         # Latest crowd state in metres, read by the 3D twin (TwinService)
         self.twin_snapshot: Optional[dict] = None
         self._scene_cache: Optional[dict] = None
@@ -1978,6 +1984,8 @@ class TwinPipeline:
     def _broadcast(self, payload: dict):
         """Rate-limited WebSocket broadcast."""
         now = time.time()
+        if not self.on_air:                      # another camera is the one on screen
+            return
         if now - self._last_broadcast >= 1.0 / Config.WS_HZ and app_loop is not None:
             asyncio.run_coroutine_threadsafe(
                 manager.broadcast(json.dumps(payload)),
@@ -2445,7 +2453,9 @@ class ReplayPipeline(TwinPipeline):
 class CDTPipeline(TwinPipeline):
     """Live pipeline: video → YOLO26 body + head detection → ByteTrack → twin."""
 
-    def __init__(self, source=None, record_experience: bool = True, name: Optional[str] = None):
+    def __init__(self, source=None, record_experience: bool = True, name: Optional[str] = None,
+                 share: Optional["CDTPipeline"] = None):
+        # share: another camera's pipeline whose models (and GPU) this one uses too
         # Detection needs PyTorch; the twin-only mode never imports it.
         # Keep Ultralytics off the network (update checks, telemetry); it reads
         # this once on import. Set YOLO_OFFLINE=0 to allow it.
@@ -2467,6 +2477,14 @@ class CDTPipeline(TwinPipeline):
         if self.half:
             self._precision = ({"quantize": 16} if "quantize" in DEFAULT_CFG_DICT
                                else {"half": True})
+
+        if share is not None:                    # another camera: same models, one at a time
+            self._infer_lock = share._infer_lock
+            self.fbox_model, self.hbox_model = share.fbox_model, share.hbox_model
+            self.points_model, self.model_name = share.points_model, share.model_name
+            self._finish_init(record_experience)
+            return
+        self._infer_lock = threading.Lock()
 
         # Load fine-tuned weights if available, else fall back to base
         # ── FBOX model ─────────────────────────────────────────────
@@ -2507,7 +2525,9 @@ class CDTPipeline(TwinPipeline):
             except Exception as e:
                 print(f"[CDT] Dense-crowd point model not loaded ({e}); using head boxes only.")
         print(f"[CDT] Device: {self.device}{' (FP16)' if self.half else ''}")
+        self._finish_init(record_experience)
 
+    def _finish_init(self, record_experience: bool):
         self._hbox_last: List[dict] = []
         self._points_last = (np.zeros((0, 2)), np.zeros(0))
         from dense import HeadScale
@@ -2576,17 +2596,10 @@ class CDTPipeline(TwinPipeline):
 
     def detect(self, model, frame: np.ndarray, conf: float, imgsz: int) -> List[dict]:
         """Boxes for one frame as [{"box": [x1, y1, x2, y2], "confidence": c}, ...]."""
-        res = model(
-            frame,
-            classes=[0],
-            conf=conf,
-            iou=Config.YOLO_IOU,
-            imgsz=imgsz,
-            max_det=Config.MAX_DET,
-            device=self.device,
-            verbose=False,
-            **self._precision,
-        )[0]
+        with self._infer_lock:                   # the models may be shared by several cameras
+            res = model(frame, classes=[0], conf=conf, iou=Config.YOLO_IOU, imgsz=imgsz,
+                        max_det=Config.MAX_DET, device=self.device, verbose=False,
+                        **self._precision)[0]
         boxes = res.boxes.xyxy.cpu().numpy()
         confs = res.boxes.conf.cpu().numpy()
         return [{"box": b.tolist(), "confidence": float(c)} for b, c in zip(boxes, confs)]
@@ -2634,7 +2647,10 @@ class CDTPipeline(TwinPipeline):
         )
 
         # HBOX = head detector; in dense mode at high resolution for tiny heads
-        if self.dense or self._frame_n % max(1, Config.HBOX_EVERY) == 0:
+        alt = self.dense and Config.DENSE_ALTERNATE and self.points_model is not None
+        heads_now = (self._frame_n % 2 == 0 or not self._hbox_last) if alt else (
+            self.dense or self._frame_n % max(1, Config.HBOX_EVERY) == 0)
+        if heads_now:
             self._hbox_last = self.detect(
                 self.hbox_model, frame,
                 Config.HBOX_CONF_DENSE if self.dense else Config.HBOX_CONF,
@@ -2648,9 +2664,11 @@ class CDTPipeline(TwinPipeline):
         # show heads the head detector can't see
         probe = (self.points_model is not None and not self.dense and Config.DENSE_AUTO
                  and self._frame_n % max(1, Config.DENSE_PROBE_EVERY) == 0)
-        if self.points_model is not None and (probe or (
-                self.dense and self._frame_n % max(1, Config.DENSE_EVERY) == 0)):
-            self._points_last = self.points_model(frame)
+        points_now = (self._frame_n % 2 == 1 or not len(self._points_last[0])) if alt else (
+            self._frame_n % max(1, Config.DENSE_EVERY) == 0)
+        if self.points_model is not None and (probe or (self.dense and points_now)):
+            with self._infer_lock:
+                self._points_last = self.points_model(frame)
         use_points = self.points_model is not None and (self.dense or probe)
         t_detect = time.perf_counter()
 
@@ -2885,14 +2903,14 @@ class TwinService:
         self._running = False
 
     def _send(self, msg: dict):
-        if app_loop is not None:
+        if app_loop is not None and self.pipeline.on_air:
             asyncio.run_coroutine_threadsafe(twin_manager.broadcast(json.dumps(msg)), app_loop)
 
     def _loop(self):
         next_state = next_forecast = 0.0
         while self._running:
             snap = self.pipeline.twin_snapshot
-            viewers = bool(twin_manager.active)
+            viewers = bool(twin_manager.active) and self.pipeline.on_air
             # Layer J → K: a flagged scene is forecast even with no one watching
             flagged = Config.FORECAST_ALERTS and snap is not None and snap["trigger"]["active"]
             if snap is not None and (viewers or flagged):
@@ -3072,6 +3090,11 @@ manager  = ConnectionManager()               # dashboard (/ws)
 twin_manager = ConnectionManager()           # 3D twin (/ws/twin)
 pipeline: Optional[TwinPipeline] = None
 twin_service: Optional[TwinService] = None
+# Multi-camera: one pipeline + twin service per camera; `pipeline` / `twin_service`
+# are the camera on screen (every single-camera endpoint serves that one)
+cameras: Dict[str, TwinPipeline] = {}
+twin_services: Dict[str, TwinService] = {}
+site: Optional[SiteFusion] = None
 app_loop: Optional[asyncio.AbstractEventLoop] = None
 STARTED_AT = time.time()
 
@@ -3087,18 +3110,20 @@ app.add_middleware(
 async def startup():
     global app_loop, twin_service
     app_loop = asyncio.get_event_loop()
-    if pipeline:
-        pipeline.start()
-        twin_service = TwinService(pipeline)
-        twin_service.start()
+    for cid, p in (cameras.items() if cameras else ([("cam1", pipeline)] if pipeline else [])):
+        p.start()
+        twin_services[cid] = TwinService(p)
+        twin_services[cid].start()
+    if pipeline is not None:
+        twin_service = twin_services.get(pipeline.camera_id) or next(iter(twin_services.values()), None)
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    if twin_service:
-        twin_service.stop()
-    if pipeline:
-        pipeline.stop()
+    for ts in twin_services.values():
+        ts.stop()
+    for p in (cameras.values() if cameras else ([pipeline] if pipeline else [])):
+        p.stop()
 
 
 @app.websocket("/ws")
@@ -3174,6 +3199,46 @@ async def fusion_log():
     if pipeline:
         return list(pipeline.fusion._log)[-20:]
     return []
+
+
+@app.get("/api/cameras")
+async def cameras_info():
+    """Every camera, with its live numbers, and which one is on screen."""
+    cams = cameras or ({pipeline.camera_id: pipeline} if pipeline else {})
+    out = []
+    for cid, p in cams.items():
+        d = p.latest_payload or {}
+        out.append({"id": cid, "source": p.source_name, "on_air": p is pipeline,
+                    "people": d.get("n_agents"), "risk": (d.get("risk") or {}).get("risk_label"),
+                    "fps": d.get("fps"), "dense": p.dense})
+    return {"cameras": out, "site": site is not None}
+
+
+@app.post("/api/camera")
+async def select_camera(body: dict = Body(...)):
+    """Put another camera on screen: {"id": "cam2"}."""
+    global pipeline, twin_service
+    cid = str(body.get("id", ""))
+    if cid not in cameras:
+        raise HTTPException(404, f"No camera {cid!r}; cameras: {', '.join(cameras) or 'none'}")
+    for c, p in cameras.items():
+        p.on_air = c == cid
+    pipeline, twin_service = cameras[cid], twin_services.get(cid)
+    return {"on_air": cid}
+
+
+@app.get("/api/site")
+async def site_info():
+    """
+    The whole site: everyone every camera sees, on one map. With a site file
+    (--site) people in overlapping views are merged and counted once; without
+    one the cameras are simply added up.
+    """
+    cams = cameras or ({pipeline.camera_id: pipeline} if pipeline else {})
+    pos = {cid: (p.twin_snapshot or {}).get("pos", np.zeros((0, 2))) for cid, p in cams.items()}
+    fused = (site or SiteFusion()).fuse(pos)
+    fused.pop("people") if len(fused["people"]) > 2000 else None
+    return fused
 
 
 @app.get("/api/frame.jpg")
@@ -3342,9 +3407,13 @@ except Exception:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Crowd Digital Twin — Real-Time Server")
     parser.add_argument(
-        "--source", default="videos/demo.mp4",
-        help="Video source: 0=webcam | rtsp://... | path/to/video.mp4"
+        "--source", action="append",
+        help="Video source: 0=webcam | rtsp://... | path/to/video.mp4 (default videos/demo.mp4). "
+             "Repeat for several cameras: each gets its own twin; the dashboard switches between them"
     )
+    parser.add_argument("--site", metavar="JSON",
+                        help="site file placing the cameras on one map (see multicam.py): people in "
+                             "overlapping views are counted once in /api/site")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", default=8000, type=int)
     parser.add_argument("--device", default=Config.DEVICE,
@@ -3399,8 +3468,17 @@ if __name__ == "__main__":
         src = f"replay of {args.replay}"
         pipeline = ReplayPipeline(args.replay, size=size, fps=args.fps)
     else:
-        src = int(args.source) if args.source.isdigit() else args.source
-        pipeline = CDTPipeline(src)
+        srcs = [int(s) if s.isdigit() else s for s in (args.source or ["videos/demo.mp4"])]
+        first = None
+        for k, s_ in enumerate(srcs):
+            p = CDTPipeline(s_, share=first)
+            p.camera_id, p.on_air = f"cam{k + 1}", k == 0
+            cameras[p.camera_id] = p
+            first = first or p
+        pipeline = first
+        src = ", ".join(map(str, srcs))
+        if args.site:
+            site = SiteFusion.from_file(args.site)
 
     if args.mqtt:
         # Look the fusion up per message: switching source gives the pipeline a new one
