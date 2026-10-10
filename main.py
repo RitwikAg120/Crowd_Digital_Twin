@@ -126,8 +126,11 @@ class Config:
     CALIBRATION_FILE  = None       # JSON: ≥4 image↔ground points, or camera height/pitch/FOV
     AUTO_CALIBRATE    = True
     REUSE_AUTO_CALIBRATION = True  # start from calibration/auto_<video>.json when it exists
-    CAMERA_HFOV_DEG   = 65.0       # horizontal field of view assumed by the estimate
-    PERSON_HEIGHT_M   = 1.7        # average full-body height, the estimate's ruler
+    CAMERA_HFOV_DEG   = 65.0       # field of view across the image's LONG side, assumed by the
+                                   # estimate (a portrait phone video sees ~39° across its width)
+    PERSON_HEIGHT_M   = 1.676      # average full-body height (5'6"), the estimate's ruler
+    CALIB_MIN_SPAN    = 0.15       # feet must spread over this share of the image height to
+                                   # measure perspective; otherwise heads are used
     CALIB_MIN_BOXES   = 300        # full-body boxes needed before estimating
     CALIB_MIN_FRAMES  = 20
     CALIB_MAX_FRAMES  = 300        # give up and stay flat after this many frames
@@ -163,6 +166,8 @@ class Config:
                                    # viewer and alert on zones predicted to reach capacity
     FORECAST_ALERT_MAX_S = 20.0    # … within this many seconds
     OBSTACLE_EVERY_S  = 30.0       # how often the twin re-learns obstacles (never-walked floor)
+    OBSTACLE_MIN_PERSON_PX = 32    # only where a person would be this tall in the image: farther
+                                   # away, empty floor may just be people the detector misses
     WHATIF_STEPS      = 50         # panic what-if: 50 × SIM_STEP_S = 40 s
 
     # Social force model (Helbing & Molnár, 1995) — metres and seconds
@@ -195,6 +200,7 @@ class Config:
 
     # Output
     SEND_FRAME        = True       # False → heatmap without any video pixels in the payload
+    OVERLAY_DETAIL    = "clean"    # dashboard video: "clean" (boxes, feet, zones) or "full" (+ ids, heads)
     WS_HZ             = 10         # max broadcasts per second
     EXPERIENCE_MAX_GB = 2.0        # oldest experience logs/frames are deleted beyond this
 
@@ -222,6 +228,14 @@ def fit_within(h: int, w: int, max_h: int, max_w: int) -> Tuple[int, int]:
 
 
 # ─── Ground Plane (perspective) ───────────────────────────────────────────────
+
+def assumed_hfov(h: int, w: int, long_fov: Optional[float] = None) -> float:
+    """Horizontal field of view for an h × w image whose long side sees long_fov."""
+    long_fov = Config.CAMERA_HFOV_DEG if long_fov is None else long_fov
+    if w >= h:
+        return long_fov
+    return math.degrees(2 * math.atan(math.tan(math.radians(long_fov) / 2) * w / h))
+
 
 def person_height_px(v_foot, f: float, v0: float, pitch: float, cam_h: float,
                      person_h: float) -> np.ndarray:
@@ -328,7 +342,7 @@ class GroundPlane:
             return cls.from_points(h, w, pts, d["world_points"], source="calibration")
         if "camera_height_m" in d:
             return cls.from_camera(h, w, d["camera_height_m"], d["pitch_deg"],
-                                   d.get("hfov_deg", Config.CAMERA_HFOV_DEG), source="calibration")
+                                   d.get("hfov_deg", assumed_hfov(h, w)), source="calibration")
         if "scene_width_m" in d:
             return cls.flat(h, w, d["scene_width_m"], d["scene_height_m"], source="calibration")
         raise ValueError(f"{path}: expected image_points + world_points, camera_height_m, "
@@ -369,6 +383,13 @@ class GroundPlane:
         p   = np.asarray(pts, float).reshape(-1, 2)
         hom = p @ self.H_inv[:, :2].T + self.H_inv[:, 2]
         return hom[:, :2] / hom[:, 2:3]
+
+    def person_px(self, pts) -> np.ndarray:
+        """Roughly how tall (px) a PERSON_HEIGHT_M person standing at image points
+        appears: their height over the local sideways ground scale."""
+        p = np.asarray(pts, float).reshape(-1, 2)
+        a, b = self.to_world(p - [0.5, 0]), self.to_world(p + [0.5, 0])
+        return Config.PERSON_HEIGHT_M / np.maximum(np.linalg.norm(b - a, axis=1), 1e-6)
 
     def m_per_px(self, pts) -> np.ndarray:
         """Local ground scale (metres per pixel) at image points."""
@@ -567,16 +588,26 @@ class PedestrianCalibrator:
 
     def fit(self) -> Tuple[Optional[GroundPlane], str]:
         """The estimated ground plane (None if it can't be estimated) and why."""
-        fits = []
-        if len(self._feet) >= 30:
-            fits.append(lambda: self._fit(np.array(self._feet), np.array(self._heights),
-                                          Config.PERSON_HEIGHT_M, 0.0, "people"))
-        if len(self._heads) >= 60:                        # dense crowd: heads measure too
-            heads = lambda: self._fit(np.array(self._chins), np.array(self._heads),
-                                      Config.HEAD_SIZE_M,
-                                      Config.PERSON_HEIGHT_M - Config.HEAD_SIZE_M, "heads")
-            # Where heads far outnumber visible bodies, they span the scene better
-            fits.insert(0 if len(self._heads) >= 3 * len(self._feet) else len(fits), heads)
+        # Perspective is measured across rows: a ruler is only as good as the
+        # spread of the rows it was seen at. Whole bodies are the better ruler
+        # (heads all sit near the horizon when the camera is at head height),
+        # so they are used when their feet cover CALIB_MIN_SPAN of the image;
+        # otherwise heads (a dense crowd, or only the front row fully visible).
+        span = lambda r: (float(np.percentile(r, 95) - np.percentile(r, 5)) / self.h
+                          if len(r) else 0.0)
+        bodies = (lambda: self._fit(np.array(self._feet), np.array(self._heights),
+                                    Config.PERSON_HEIGHT_M, 0.0, "people"))             if len(self._feet) >= 30 else None
+        heads = (lambda: self._fit(np.array(self._chins), np.array(self._heads),
+                                   Config.HEAD_SIZE_M,
+                                   Config.PERSON_HEIGHT_M - Config.HEAD_SIZE_M, "heads"))             if len(self._heads) >= 60 else None
+        sb, sh = span(self._feet), span(self._chins)
+        if bodies and sb >= Config.CALIB_MIN_SPAN:
+            fits = [bodies, heads]
+        elif heads and (sh >= Config.CALIB_MIN_SPAN or sh > sb):
+            fits = [heads, bodies]
+        else:
+            fits = [bodies, heads]
+        fits = [f for f in fits if f is not None]
         if not fits:
             return None, f"only {len(self._feet)} usable full-body boxes"
         why_all = []
@@ -609,7 +640,15 @@ class PedestrianCalibrator:
             return None, "box heights don't follow a single ground plane"
         y, hp = y[best], hp[best]
         a, b = np.polyfit(y, hp, 1)
-        if a <= 0 or a * y.max() + b < 1.15 * (a * y.min() + b):
+        # Little perspective (distant or overhead view): the sizes would only
+        # shrink to nothing at a horizon far above the frame. Judged by the
+        # horizon, not by the size change across the rows seen — a narrow band
+        # of rows hardly changes even under strong perspective.
+        if a <= 0:
+            # Sizes don't grow towards the camera: in a packed crowd the detector's
+            # near boxes are cut and far ones inflated — no ground plane in them
+            return None, f"the {what} don't look bigger nearer the camera"
+        if -b / a < -5.0 * self.h:
             # Hardly any perspective (distant or overhead view): one scale from their size
             s = size_m / float(np.median(hp))
             ground = GroundPlane.flat(self.h, self.w, s * self.w, s * self.h, source="pedestrians")
@@ -618,7 +657,8 @@ class PedestrianCalibrator:
         if horizon > y.min() - 5:
             return None, f"the estimated horizon falls below some {what}"
         # Exact pinhole model with the assumed field of view: fit tilt and height
-        f  = (self.w / 2) / math.tan(math.radians(Config.CAMERA_HFOV_DEG) / 2)
+        hfov = assumed_hfov(self.h, self.w)
+        f  = (self.w / 2) / math.tan(math.radians(hfov) / 2)
         v0 = self.h / 2
         lo, hi = [-0.3, 0.3], [1.5, 500.0]
         x0 = np.clip([math.atan2(v0 - horizon, f), size_m / a], lo, hi)
@@ -629,9 +669,9 @@ class PedestrianCalibrator:
         pitch, cam_h = fit.x
         cam_h = float(cam_h) + lift_m                       # above the floor
         ground = GroundPlane.from_camera(self.h, self.w, cam_h, math.degrees(pitch),
-                                         Config.CAMERA_HFOV_DEG, source="pedestrians")
+                                         hfov, source="pedestrians")
         return ground, (f"camera ≈ {cam_h:.1f} m high, tilted {math.degrees(pitch):.0f}° down "
-                        f"(from {len(y)} {what}, {Config.CAMERA_HFOV_DEG:.0f}° field of view assumed)")
+                        f"(from {len(y)} {what}, {hfov:.0f}° horizontal field of view assumed)")
 
 
 # ─── Data Classes ─────────────────────────────────────────────────────────────
@@ -657,12 +697,14 @@ class Agent:
 @dataclass
 class ZoneState:
     name:     str
-    x1:       int
+    x1:       int                      # bounding box of the zone in the image (px)
     y1:       int
     x2:       int
     y2:       int
     capacity: int   = 50
     area_m2:  float = 0.0
+    polygon:  Optional[np.ndarray] = None   # the zone on the floor (m), convex
+    image_polygon: Optional[np.ndarray] = None   # the same, in the image (px)
 
     @property
     def area(self) -> float:
@@ -677,58 +719,132 @@ class ZoneState:
         return (self.y1 + self.y2) // 2
 
 
+def _poly_area(p: np.ndarray) -> float:
+    if len(p) < 3:
+        return 0.0
+    x, y = p[:, 0], p[:, 1]
+    return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+
+def _equal_area_cuts(poly: np.ndarray, axis: int, n: int) -> List[float]:
+    """Values v_1 < … < v_(n−1) of coordinate `axis` that cut a convex polygon
+    into n slices of equal area."""
+    lo, hi = float(poly[:, axis].min()), float(poly[:, axis].max())
+    total, cuts = _poly_area(poly), []
+    for k in range(1, n):
+        target, a, b = total * k / n, lo, hi
+        for _ in range(50):                                  # bisection on the slice area
+            m = (a + b) / 2
+            part = GroundPlane._clip_half(poly, lambda p, m=m: m - p[:, axis])
+            a, b = (m, b) if _poly_area(part) < target else (a, m)
+        cuts.append((a + b) / 2)
+    return cuts
+
+
+def _slab(poly: np.ndarray, axis: int, lo: Optional[float], hi: Optional[float]) -> np.ndarray:
+    if lo is not None:
+        poly = GroundPlane._clip_half(poly, lambda p: p[:, axis] - lo)
+    if hi is not None:
+        poly = GroundPlane._clip_half(poly, lambda p: hi - p[:, axis])
+    return poly
+
+
 # ─── Zone Manager ─────────────────────────────────────────────────────────────
 
 class ZoneManager:
+    """
+    Zones on the floor, not on the image: the walkable floor in view (clipped at
+    the learned far edge) is cut into ROWS depth bands of equal floor area, and
+    each band into COLS parts of equal area, so every zone covers the same
+    number of square metres however the camera looks at it. Zone_A … Zone_C are
+    the far band (top of the image), Zone_D … Zone_F the near one. People are
+    assigned by where they stand, in metres.
+    """
     def __init__(self, h: int, w: int, ground: GroundPlane,
                  rows: int = Config.ZONE_ROWS, cols: int = Config.ZONE_COLS):
         self.zones: Dict[str, ZoneState] = {}
         self.ground = ground
         self.h, self.w = h, w
         self.rows, self.cols = rows, cols
-        self.rh, self.cw = rh, cw = h // rows, w // cols
-        for idx, name in enumerate(self.names(rows, cols)):
-            r, c = divmod(idx, cols)
-            z = ZoneState(
-                name=name,
-                x1=c * cw,
-                y1=r * rh,
-                x2=(c + 1) * cw if c < cols - 1 else w,
-                y2=(r + 1) * rh if r < rows - 1 else h,
-            )
-            # Ground area under the zone, with perspective
-            z.area_m2  = ground.area_m2([[z.x1, z.y1], [z.x2, z.y1], [z.x2, z.y2], [z.x1, z.y2]])
-            # Capacity = persons at the Fruin LOS F density (2 × DENSITY_HIGH)
-            z.capacity = max(10, int(z.area_m2 * Config.DENSITY_HIGH * 2))
-            self.zones[name] = z
+        floor = ground.visible_ground()
+        bands = []
+        if _poly_area(floor) > 1e-6:
+            ycut = _equal_area_cuts(floor, 1, rows)[::-1]     # far band first
+            edges = [None] + ycut + [None]
+            for r in range(rows):
+                hi, lo = edges[r], edges[r + 1]               # far → near: y from high to low
+                bands.append(_slab(floor, 1, lo, hi))
+        for r in range(rows):
+            band = bands[r] if bands else np.zeros((0, 2))
+            xcut = _equal_area_cuts(band, 0, cols) if _poly_area(band) > 1e-6 else []
+            xe = [None] + xcut + [None]
+            for c in range(cols):
+                name = self.names(rows, cols)[r * cols + c]
+                poly = _slab(band, 0, xe[c], xe[c + 1]) if xcut or cols == 1 else np.zeros((0, 2))
+                img = ground.to_image(poly) if len(poly) else np.zeros((0, 2))
+                if len(img):
+                    x1, y1 = np.floor(img.min(0)).astype(int)
+                    x2, y2 = np.ceil(img.max(0)).astype(int)
+                else:
+                    x1 = y1 = x2 = y2 = 0
+                z = ZoneState(name=name, x1=int(x1), y1=int(y1), x2=int(x2), y2=int(y2),
+                              polygon=poly, image_polygon=img)
+                z.area_m2  = _poly_area(poly)
+                # Capacity = persons at the Fruin LOS F density (2 × DENSITY_HIGH)
+                z.capacity = max(10, int(z.area_m2 * Config.DENSITY_HIGH * 2))
+                self.zones[name] = z
+        self._names = list(self.zones)
+        # Half-plane form of each convex zone, for vectorised assignment
+        self._half = []
+        for z in self.zones.values():
+            p = z.polygon if z.polygon is not None and len(z.polygon) >= 3 else None
+            if p is None:
+                self._half.append(None)
+                continue
+            if np.cross(p[1] - p[0], p[2] - p[1]) < 0:        # make it counter-clockwise
+                p = p[::-1]
+            e = np.roll(p, -1, axis=0) - p
+            n = np.stack([-e[:, 1], e[:, 0]], 1)              # inward normals (CCW)
+            self._half.append((n, np.einsum("ij,ij->i", n, p)))
+        cent = [z.polygon.mean(0) if z.polygon is not None and len(z.polygon) else np.full(2, np.inf)
+                for z in self.zones.values()]
+        self._centres = np.array(cent, float).reshape(-1, 2)
 
     @staticmethod
     def names(rows: int = Config.ZONE_ROWS, cols: int = Config.ZONE_COLS) -> List[str]:
         return [f"Zone_{'ABCDEFGHIJKLMNOP'[i]}" for i in range(rows * cols)]
 
-    def assign(self, cx: float, cy: float) -> str:
-        # Feet on (or just past) the frame edge belong to the edge zone
-        cx = min(max(cx, 0), self.w - 1)
-        cy = min(max(cy, 0), self.h - 1)
-        for name, z in self.zones.items():
-            if z.x1 <= cx < z.x2 and z.y1 <= cy < z.y2:
-                return name
-        return "Zone_X"
+    def index_world(self, pts) -> np.ndarray:
+        """Zone index (in names() order) for (N, 2) ground points in metres;
+        points off the floor go to the nearest zone."""
+        p = np.asarray(pts, float).reshape(-1, 2)
+        out = np.full(len(p), -1, int)
+        for i, hp in enumerate(self._half):
+            if hp is None:
+                continue
+            n, off = hp
+            inside = np.all(p @ n.T >= off - 1e-6, axis=1) & (out < 0)
+            out[inside] = i
+        miss = out < 0
+        if miss.any() and np.isfinite(self._centres).any():
+            d = np.linalg.norm(p[miss, None, :] - self._centres[None], axis=2)
+            out[miss] = np.argmin(d, axis=1)
+        return np.maximum(out, 0)
 
     def index_many(self, pts) -> np.ndarray:
         """Zone index (in names() order) for (N, 2) image points."""
         p = np.asarray(pts, float).reshape(-1, 2)
-        c = np.minimum((np.clip(p[:, 0], 0, self.w - 1) // self.cw).astype(int), self.cols - 1)
-        r = np.minimum((np.clip(p[:, 1], 0, self.h - 1) // self.rh).astype(int), self.rows - 1)
-        return r * self.cols + c
+        if not len(p):
+            return np.zeros(0, int)
+        return self.index_world(self.ground.to_world(p))
+
+    def assign(self, cx: float, cy: float) -> str:
+        return self._names[int(self.index_many([[cx, cy]])[0])]
 
     def polygons(self) -> Dict[str, np.ndarray]:
         """Each zone's walkable ground in view, as a polygon in metres."""
-        return {
-            name: self.ground.to_world(self.ground.clip(
-                [[z.x1, z.y1], [z.x2, z.y1], [z.x2, z.y2], [z.x1, z.y2]]))
-            for name, z in self.zones.items()
-        }
+        return {name: (z.polygon if z.polygon is not None else np.zeros((0, 2)))
+                for name, z in self.zones.items()}
 
     def count(self, agents: List[Agent]) -> Dict[str, int]:
         c = {n: 0 for n in self.zones}
@@ -1747,6 +1863,7 @@ class TwinPipeline:
         self._last_broadcast = 0.0
         self._running        = False
         self.latest_payload: Optional[dict] = None
+        self.latest_frame: Optional[np.ndarray] = None   # raw frame, for the 3D twin's floor
         # Latest crowd state in metres, read by the 3D twin (TwinService)
         self.twin_snapshot: Optional[dict] = None
         self._scene_cache: Optional[dict] = None
@@ -1795,8 +1912,16 @@ class TwinPipeline:
                     print(f"[Calibration] Reusing {saved.as_posix()} (delete it to estimate again)")
                 except (ValueError, KeyError, OSError) as e:
                     print(f"[Calibration] Ignoring {saved.as_posix()}: {e}")
-        if self._auto_ground is not None and (self._auto_ground.h, self._auto_ground.w) == (h, w):
-            return self._auto_ground
+        g = self._auto_ground
+        if g is not None and (g.h, g.w) != (h, w) and "camera_height_m" in g.params:
+            # The pipeline is first sized to a default frame, then to the stream's
+            # own: the camera pose is the same, rebuild its homography for this size
+            p = g.params
+            g = GroundPlane.from_camera(h, w, p["camera_height_m"], p["pitch_deg"], p["hfov_deg"],
+                                        source=g.source)
+            self._auto_ground = g
+        if g is not None and (g.h, g.w) == (h, w):
+            return g
         return GroundPlane.flat(h, w)
 
     def set_ground(self, ground: GroundPlane):
@@ -1883,6 +2008,12 @@ class TwinPipeline:
             "obstacles":   np.round(self.obstacles, 2).tolist(),     # cell centres, metres
             "obstacle_cell": round(self.memory.cell, 2),
             "frame_size":  [self._w, self._h],
+            # image → ground homography and the floor's far edge, so the twin can
+            # lay the camera image on its floor
+            "homography":  np.round(ground.H, 9).tolist(),
+            "floor_top":   ground.floor_top,
+            "w_min":       ground.w_min,
+            "video":       bool(Config.SEND_FRAME),
             "horizon_s":   round(Config.PRED_HORIZON * Config.SIM_STEP_S, 1),
         }
         return self._scene_cache
@@ -1959,6 +2090,11 @@ class TwinPipeline:
         if self.dt.clock - self._obst_at >= Config.OBSTACLE_EVERY_S:
             self._obst_at = self.dt.clock
             obst = self.memory.obstacles()
+            if len(obst):                                  # only where people would be seen
+                g   = self.zone_mgr.ground
+                img = g.to_image(obst)
+                ok  = (g.person_px(img) >= Config.OBSTACLE_MIN_PERSON_PX) &                       (img[:, 0] > 0.03 * self._w) & (img[:, 0] < 0.97 * self._w) &                       (img[:, 1] < 0.97 * self._h)
+                obst = obst[ok]
             if obst.shape != self.obstacles.shape or not np.allclose(obst, self.obstacles):
                 if len(obst) != len(self.obstacles):
                     print(f"[Twin] {len(obst)} floor cells learned as obstacles (never walked on)")
@@ -2017,102 +2153,63 @@ class TwinPipeline:
         heat       = (dmap * 255).astype(np.uint8)
         heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
         # Without SEND_FRAME (or without video, in replay) no video pixels are sent
-        overlay    = (cv2.addWeighted(frame, 0.55, heat_color, 0.45, 0)
-                      if Config.SEND_FRAME and frame is not None else heat_color)
+        video = Config.SEND_FRAME and frame is not None
+        if video:                                   # heat only where there are people
+            alpha   = (np.clip(dmap, 0, 1) * 0.55)[..., None]
+            overlay = (frame * (1 - alpha) + heat_color * alpha).astype(np.uint8)
+        else:
+            overlay = heat_color
+        full = Config.OVERLAY_DETAIL == "full"
 
+        # ── Zones: the floor area each one covers, filled by its risk ─────
+        zone_col = {"HIGH": (50, 50, 230), "MEDIUM": (0, 165, 255), "LOW": (90, 210, 90)}
+        fills = overlay.copy()
+        polys = []
         for z in self.zone_mgr.zones.values():
-            rl  = zone_risks[z.name]["risk_label"]
-            col = {"HIGH": (50, 50, 220),
-                    "MEDIUM": (0, 165, 255),
-                    "LOW":    (80, 200, 80)}.get(rl, (128, 128, 128))
-            corners = np.array([[z.x1, z.y1], [z.x2, z.y1], [z.x2, z.y2], [z.x1, z.y2]], float)
+            corners = z.image_polygon
+            if corners is None or len(corners) < 3:
+                continue
+            corners = np.asarray(corners, float)
             if moving:
                 corners = apply_transform(from_ref, corners)
-            cv2.polylines(overlay, [corners.round().astype(np.int32)], True, col, 2)
-            cv2.putText(overlay, f"{z.name}: {rl}",
-                        (int(corners[0, 0]) + 6, int(corners[0, 1]) + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+            pts = corners.round().astype(np.int32)
+            col = zone_col.get(zone_risks[z.name]["risk_label"], (128, 128, 128))
+            cv2.fillPoly(fills, [pts], col)
+            polys.append((z, pts, col))
+        overlay = cv2.addWeighted(fills, 0.16, overlay, 0.84, 0)
+        for z, pts, col in polys:
+            cv2.polylines(overlay, [pts], True, col, 2, cv2.LINE_AA)
 
-        # ── Draw tracked full-body boxes ──────────────────────────────────
-
+        # ── People: a thin box and a dot at the feet; ids only in full detail ──
         for det in det_list:
-
             if "x1" not in det:
                 continue
-
-            x1, y1, x2, y2 = map(
-                int,
-                (det["x1"], det["y1"], det["x2"], det["y2"])
-            )
-
-            # A person found only by their head = an orange head box: their
-            # whole-person box would cover the people in front of them
-            if "head" in det:
+            x1, y1, x2, y2 = map(int, (det["x1"], det["y1"], det["x2"], det["y2"]))
+            if "head" in det:                       # found only by the head: the head box
                 hx1, hy1, hx2, hy2 = map(int, det["head"])
-                cv2.rectangle(overlay, (hx1, hy1), (hx2, hy2), (0, 140, 255), 1)
+                cv2.rectangle(overlay, (hx1, hy1), (hx2, hy2), (0, 170, 255), 1)
                 continue
-
-            label = f"#{det['id']} {det['confidence']:.2f}"
-
-            # Full-body box = yellow
-            col = (0, 255, 255)
-
-            cv2.rectangle(
-                overlay,
-                (x1, y1),
-                (x2, y2),
-                col,
-                2
-            )
-
-            cv2.putText(
-                overlay,
-                label,
-                (x1, max(12, y1 - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                col,
-                1
-            )
-        # ── Draw HBOX detections ──────────────────────────────────────────
-        # Not when the head points count the heads (they'd be drawn twice), and
-        # without labels in a dense crowd, where they would cover the picture
-        points_used = any(d.get("src") == "point" for d in det_list)
-
-        for hbox in (() if points_used else hbox_detections):
-
-            x1, y1, x2, y2 = map(
-                int,
-                hbox["box"]
-            )
-
-            label = f"HEAD {hbox['confidence']:.2f}"
-
-            # HBOX = purple
-            col = (255, 0, 255)
-
-            cv2.rectangle(
-                overlay,
-                (x1, y1),
-                (x2, y2),
-                col,
-                1 if self.dense else 2
-            )
-            if self.dense:
-                continue
-
-            cv2.putText(
-                overlay,
-                label,
-                (x1, max(12, y1 - 5)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                col,
-                1
-            )
-
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (235, 235, 235), 1)
+            if full:
+                cv2.putText(overlay, f"#{det['id']} {det['confidence']:.2f}", (x1, max(12, y1 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1)
+        if full and not any(d.get("src") == "point" for d in det_list):
+            for hbox in hbox_detections:            # every head the head detector found
+                x1, y1, x2, y2 = map(int, hbox["box"])
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 0, 255), 1)
         for a in agents_now:
-            cv2.circle(overlay, (int(a.x), int(a.y)), 2 if self.dense else 4, (0, 0, 255), -1)
+            cv2.circle(overlay, (int(a.x), int(a.y)), 2 if self.dense else 3, (0, 0, 255), -1, cv2.LINE_AA)
+
+        # Zone labels last, on a dark tag so they stay readable over the crowd
+        for z, pts, col in polys:
+            txt = f"{z.name.replace('Zone_', '')}  {z_counts.get(z.name, 0)}/{z.capacity}"
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cx, cy = pts.mean(0).astype(int)
+            cx = int(np.clip(cx, tw // 2 + 4, self._w - tw // 2 - 4))
+            cy = int(np.clip(cy, th + 6, self._h - 6))
+            cv2.rectangle(overlay, (cx - tw // 2 - 4, cy - th - 5), (cx + tw // 2 + 4, cy + 5), (20, 20, 20), -1)
+            cv2.rectangle(overlay, (cx - tw // 2 - 4, cy - th - 5), (cx + tw // 2 + 4, cy + 5), col, 1)
+            cv2.putText(overlay, txt, (cx - tw // 2, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
 
         _, buf        = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 72])
         annotated_b64 = base64.b64encode(buf).decode()
@@ -2231,6 +2328,8 @@ class TwinPipeline:
             },
         }
         self.latest_payload = payload
+        if frame is not None:
+            self.latest_frame = frame
 
         # ── Crowd state in metres for the 3D twin (one atomic swap) ───────
         zone_ix = {n: i for i, n in enumerate(self.zone_mgr.zones)}
@@ -3059,6 +3158,8 @@ async def zones_info():
             n: {
                 "x1": z.x1, "y1": z.y1,
                 "x2": z.x2, "y2": z.y2,
+                "polygon_m":  np.round(z.polygon, 2).tolist() if z.polygon is not None else [],
+                "polygon_px": np.round(z.image_polygon, 1).tolist() if z.image_polygon is not None else [],
                 "area_m2": round(z.area_m2, 1),
                 "capacity": z.capacity,
             }
@@ -3073,6 +3174,17 @@ async def fusion_log():
     if pipeline:
         return list(pipeline.fusion._log)[-20:]
     return []
+
+
+@app.get("/api/frame.jpg")
+async def frame_jpg():
+    """The latest raw camera frame (no overlays) — the 3D twin's floor texture."""
+    from fastapi.responses import Response
+    f = pipeline.latest_frame if pipeline is not None else None
+    if f is None or not Config.SEND_FRAME:
+        raise HTTPException(404, "No video frame (twin-only mode, or SEND_FRAME is off)")
+    ok, buf = await asyncio.to_thread(cv2.imencode, ".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return Response(buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/twin")

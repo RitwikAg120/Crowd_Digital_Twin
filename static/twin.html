@@ -63,6 +63,7 @@ th:first-child,td:first-child{text-align:left}
   <button class="btn" id="v-orbit" title="Three-quarter view (O)">3/4</button>
   <button class="btn" id="v-top" title="Top-down (T)">Top</button>
   <button class="btn" id="whatif" title="What if this crowd panicked now? Escape-panic scenario, 40 s (P)">Panic what-if</button>
+  <button class="btn on" id="v-video" title="Lay the live camera image on the floor (V)">Video floor</button>
   <button class="btn on" id="c-speed" title="Colour people by speed">Speed</button>
   <button class="btn" id="c-risk" title="Colour people by their zone's risk">Zone risk</button>
   <a class="btn" href="/" target="_blank">Dashboard ↗</a>
@@ -140,6 +141,56 @@ scene.add(sun);
 // Ground metres (X right, Y away from the camera) → three.js (y up, −z away)
 const P = (x, y, h = 0) => new THREE.Vector3(x, h, -y);
 const deg = THREE.MathUtils.degToRad;
+
+// ── Video floor: the camera image laid on the ground through the calibration ──
+// A grid in image space; each vertex goes to metres through the image→ground
+// homography, its texture coordinate is its own pixel, so every small cell is
+// textured from exactly the pixels that show it (perspective-correct to within
+// a cell). People, zones and edges then sit on the real scene.
+const videoTex = new THREE.Texture();
+videoTex.colorSpace = THREE.SRGBColorSpace;
+videoTex.minFilter = THREE.LinearFilter;
+let videoOn = true, videoMesh = null, videoTimer = 0, videoBusy = false;
+function videoFloor(s) {
+  const H = s.homography, [W, Hh] = s.frame_size, top = Math.max(0, s.floor_top || 0);
+  const NX = 64, NY = 48, pos = [], uv = [], ok = [], idx = [];
+  for (let j = 0; j <= NY; j++) {
+    const v = top + (Hh - 1 - top) * j / NY;
+    for (let i = 0; i <= NX; i++) {
+      const u = (W - 1) * i / NX;
+      const w = H[2][0] * u + H[2][1] * v + H[2][2];
+      const good = w > (s.w_min || 0.04);
+      const X = (H[0][0] * u + H[0][1] * v + H[0][2]) / Math.max(w, 1e-6);
+      const Y = (H[1][0] * u + H[1][1] * v + H[1][2]) / Math.max(w, 1e-6);
+      pos.push(X, 0.004, -Y); uv.push(u / W, 1 - v / Hh); ok.push(good);
+    }
+  }
+  const at = (i, j) => j * (NX + 1) + i;
+  for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+    const a = at(i, j), b = at(i + 1, j), c = at(i, j + 1), d = at(i + 1, j + 1);
+    if (ok[a] && ok[b] && ok[c] && ok[d]) idx.push(a, c, b, b, c, d);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.DoubleSide }));
+  m.visible = videoOn && !!videoTex.image;
+  return m;
+}
+function refreshVideo(dt) {
+  if (!videoOn || !videoMesh || videoBusy || (videoTimer += dt) < 0.25) return;
+  videoTimer = 0; videoBusy = true;
+  const img = new Image();
+  img.onload = () => { videoTex.image = img; videoTex.needsUpdate = true; if (videoMesh) videoMesh.visible = videoOn; videoBusy = false; };
+  img.onerror = () => { videoBusy = false; };
+  img.src = '/api/frame.jpg?t=' + Date.now();
+}
+function setVideo(on) {
+  videoOn = on;
+  document.getElementById('v-video').classList.toggle('on', on);
+  if (videoMesh) videoMesh.visible = on && !!videoTex.image;
+}
 
 // ── Environment, set up from the server's scene ─────────────────────────
 let env = new THREE.Group();
@@ -270,13 +321,16 @@ function buildEnvironment(s) {
   if (!s.floor || s.floor.length < 3) return;
 
   env.add(flatMesh(s.floor, new THREE.MeshLambertMaterial({ color: 0x18233a }), 0));
+  videoMesh = s.homography && s.video ? videoFloor(s) : null;
+  if (videoMesh) env.add(videoMesh);
+  document.getElementById('v-video').disabled = !videoMesh;
   env.add(gridLines(s.floor, 2));
   zoneFills = s.zones.map(z => {
     if (!z.polygon || z.polygon.length < 3) return null;
     const fill = flatMesh(z.polygon, new THREE.MeshBasicMaterial({
       color: 0x2ecc71, transparent: true, opacity: 0.16, depthWrite: false }), 0.02);
     env.add(fill);
-    env.add(outline(z.polygon, 0x3b5074, 0.03));
+    env.add(outline(z.polygon, 0x9fd4ff, 0.03));
     env.add(textSprite(z.name.replace('Zone_', ''), centroid(z.polygon), 0.8,
                        Math.min(Math.max(Math.sqrt(z.area_m2) / 6, 0.9), 6)));
     return fill;
@@ -417,7 +471,8 @@ function onState(m) {
 function drawLive(dt) {
   const k = 1 - Math.exp(-dt * 10);               // glide towards the latest positions
   const fading = forecast && tNow > 0.001;
-  liveBodyMat.opacity = liveHeadMat.opacity = fading ? 0.25 : 1;
+  const overVideo = videoOn && videoMesh && videoMesh.visible;      // let the real scene show through
+  liveBodyMat.opacity = liveHeadMat.opacity = fading ? 0.25 : overVideo ? 0.6 : 1;
   let i = 0, n = 0;
   for (const a of agents.values()) {
     if (i >= MAX) break;
@@ -596,6 +651,7 @@ function setColorMode(m) {
   document.getElementById('c-risk').classList.toggle('on', m === 'risk');
 }
 document.getElementById('c-speed').addEventListener('click', () => setColorMode('speed'));
+document.getElementById('v-video').addEventListener('click', () => setVideo(!videoOn));
 // Panic what-if: ask the server to run the scenario from the crowd now, then play it
 function askWhatif() {
   const lv = +document.getElementById('wi-level').value;
@@ -620,6 +676,7 @@ addEventListener('keydown', e => {
   else if (e.key === 't') setView('top');
   else if (e.key === 'o') setView('orbit');
   else if (e.key === 'p') setWhatif(!showWhatif);
+  else if (e.key === 'v') setVideo(!videoOn);
 });
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -669,6 +726,7 @@ function frame() {
     if (t > horizon) t = 0;
     setTime(t);
   }
+  refreshVideo(dt);
   drawLive(dt);
   drawForecast();
   colorZones();
