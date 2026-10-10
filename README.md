@@ -17,7 +17,6 @@ zone risk scoring and a live WebSocket dashboard.
 | `train_dense.py`           | Trains the dense-crowd point model (run on the GB10)                     |
 | `export.py`                | TensorRT / ONNX export for Jetson or the GB10 (run on the target)        |
 | `scripts/`                 | GB10: `gb10_setup.sh`, `fetch_datasets.py`, `run_gb10.sh` (every measurement and training run) |
-| `tools/`                   | `annotate_points.py` (label heads for training), `iot_gate_sim.py` (play a gate counter) |
 | `tests/`                   | Checks: `python tests/test_forecast.py` (twin-only env), `test_dense.py`, `test_api.py` (full env) |
 | `calibrate.py`             | Ground calibration: click ≥4 floor points, or give the camera's height/tilt |
 | `calibration/`             | Calibration files; `auto_<video>.json` are the saved automatic estimates |
@@ -29,7 +28,6 @@ zone risk scoring and a live WebSocket dashboard.
 | `reference/`               | Training notebooks (`yolo26smodel`, `yolo26nmodel`, `yoloheadv1`) and the capstone report |
 | `results.csv`              | Training log of the FBOX model (50 epochs, final mAP50 ≈ 0.857)          |
 | `experience/`              | `ExperienceBuffer` — logs per-frame results (`logs/`) and sampled frames (`frames/`) |
-| `retrain/retrain_trigger.py` | Reports when enough experience samples exist to retrain              |
 | `videos/`                  | Demo footage                                                             |
 | `dataset/`                 | GB10 only: `MOT17/`, `CrowdHuman/`, `JHU-Crowd/` (not in git), `kumbh_points/` for your own labelled frames |
 | `requirements.txt`         | Full pipeline (PyTorch + YOLO26)                                         |
@@ -165,15 +163,16 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
 - **Zones and risk.** Zone capacity is the head-count at 0.8 p/m² (Fruin LOS
   F), where the density risk term saturates; the speed term saturates at
   3 m/s (running) and uses each zone's median speed.
-- **Fusion (A).** `C_f = 0.70·C_video + 0.30·C_iot`,
+- **Fusion (A).** IoT gate counters are optional and off by default: without
+  them the fused count is the video count (κ = 1). Start with `--iot` (or
+  `--mqtt`) to turn them on; then `C_f = 0.70·C_video + 0.30·C_iot`,
   `κ = 1 − |C_video − C_iot| / max(C_video, C_iot, 1)`. Without real gate
   sensors, `IoTSimulator` follows the smoothed video count plus people the
   camera misses, with a bounded (mean-reverting) miscount. Real gate counters
   report over HTTP (`POST /api/iot {"entry": 3, "exit": 1}`, optional
   `--iot-token`) or MQTT (`--mqtt broker:1883 --mqtt-topic cdt/gates/#`, needs
   `paho-mqtt`); the first report switches the fusion to live gates.
-  `tools/iot_gate_sim.py` plays a gate counter over either path. When the
-  gates see more than the camera, detection confidence is boosted (up to ×1.2).
+  When the gates see more than the camera, detection confidence is boosted (up to ×1.2).
 - **Motion state.** Each person's feet go through a Kalman filter on the
   ground (`forecast.MotionFilter`) whose measurement noise comes from the
   perspective: a far-away pixel spans metres of floor, so a far person's box
@@ -261,8 +260,7 @@ CrowdHuman (crowdhuman.org) and JHU-Crowd++ (crowd-counting.com) need their
 licences accepted, so `fetch_datasets.py` only checks they are unpacked under
 `dataset/`. `run_gb10.sh train` trains the point model on CrowdHuman; `jhu`
 fine-tunes it on CrowdHuman + JHU-Crowd++ (`weights/p2pnet_crowd_jhu.pth`). To
-adapt it to your own footage, label 30–50 frames with `tools/annotate_points.py`
-(it pre-fills heads from the detector) into `dataset/kumbh_points/{train,test}`;
+adapt it to your own footage, label 30–50 frames (one `x y` head point per line) into `dataset/kumbh_points/{train,test}`;
 `run_gb10.sh` includes them.
 
 ## 6. Layer map (report layers A–O)
