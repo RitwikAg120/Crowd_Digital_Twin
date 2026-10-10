@@ -9,9 +9,6 @@ switches the fusion from its simulated gates to the real ones:
          (header X-IoT-Token when Config.IOT_TOKEN is set)
   MQTT   python main.py ... --mqtt broker.local:1883 --mqtt-topic cdt/gates/#
          payload {"entry": 3, "exit": 1} or "3,1"; needs `pip install paho-mqtt`
-
-tools/iot_gate_sim.py plays a gate counter over either path, so the fusion
-can be exercised without hardware.
 """
 
 import json

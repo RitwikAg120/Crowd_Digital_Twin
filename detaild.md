@@ -134,7 +134,6 @@ Crowd_Digital_Twin/
 ├── calibration/       # auto_<video>.json saved ground estimates
 ├── dataset/           # GB10: MOT17/, CrowdHuman/, JHU-Crowd/, kumbh_points/ (not in git)
 ├── scripts/           # gb10_setup.sh, fetch_datasets.py, preflight.py, run_gb10.sh
-├── tools/             # annotate_points.py (label heads), iot_gate_sim.py
 ├── tests/             # runner.py + test_forecast / test_scene / test_dense / test_api
 ├── experience/        # ExperienceBuffer: per-frame logs + sampled frames
 ├── reference/         # Training notebooks + capstone report
@@ -421,7 +420,7 @@ videos and replays tracks.
 
 `train_dense.py` reads CrowdHuman `.odgt` head boxes (masking unlabelled crowd
 regions so they aren't taught as background), JHU-Crowd++ point files, and your own
-`points:` folders (`tools/annotate_points.py`). It trains P2PNet with Hungarian
+`points:` folders (one `x y` head point per line). It trains P2PNet with Hungarian
 point matching, early stopping (`--patience`) and resume (`--resume`).
 
 GB10 workflow:
