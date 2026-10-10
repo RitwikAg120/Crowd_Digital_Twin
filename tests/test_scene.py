@@ -153,5 +153,47 @@ def test_stream_urls_the_switcher_accepts():
         assert stream_source(bad) is None, bad
 
 
+def test_zones_cover_equal_floor_areas():
+    from main import ZoneManager
+    g = GroundPlane.from_camera(596, 1280, 5.2, 19.0, 65.0)
+    g.floor_top = 90.0
+    zm = ZoneManager(596, 1280, g)
+    areas = [z.area_m2 for z in zm.zones.values()]
+    assert max(areas) - min(areas) < 0.01 * max(areas), areas
+    # far zones are the top of the image, near zones the bottom; feet go to the zone they stand in
+    assert zm.assign(640, 580) == "Zone_E" and zm.assign(640, 120) == "Zone_B",         (zm.assign(640, 580), zm.assign(640, 120))
+    assert zm.assign(20, 590) == "Zone_D" and zm.assign(1260, 590) == "Zone_F"
+    return f"6 zones of {areas[0]:.0f} m²"
+
+
+def test_saved_calibration_survives_the_resize_at_start():
+    """The pipeline is sized to a default frame first, then to the stream's own:
+    a saved camera calibration must be kept for the real size, not dropped to flat."""
+    import tempfile, os
+    old_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as d:
+        os.chdir(d)
+        try:
+            Path("calibration").mkdir()
+            Path("calibration/auto_clip.json").write_text(json.dumps(
+                {"camera_height_m": 5.2, "pitch_deg": 19.0, "hfov_deg": 65.0, "image_size": [1280, 596]}))
+            Config.AUTO_CALIBRATE = True
+            tw = TwinPipeline(record_experience=False)
+            tw.calib_name, tw._auto_tried, tw._auto_ground = "clip", False, None
+            tw.configure(720, 1280, 25.0)
+            tw.configure(596, 1280, 30.0)
+            g = tw.zone_mgr.ground
+            assert g.params.get("camera_height_m") == 5.2 and (g.h, g.w) == (596, 1280), g.params
+        finally:
+            Config.AUTO_CALIBRATE = False
+            os.chdir(old_cwd)
+
+
+def test_portrait_video_assumes_the_narrow_field_of_view():
+    from main import assumed_hfov
+    assert assumed_hfov(720, 1280) == Config.CAMERA_HFOV_DEG
+    assert 38 < assumed_hfov(1280, 720) < 40          # 65° across the long side
+
+
 if __name__ == "__main__":
     runner.run(dict(globals()))

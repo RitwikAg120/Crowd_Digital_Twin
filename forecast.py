@@ -76,6 +76,9 @@ class ForecastParams:
     density_radius:     float = 1.2      # m, neighbourhood for local density
 
     # Arrivals
+    weidmann_max_gain:  float = 1.0      # density only slows people (a thinning crowd does not
+                                         # speed them past their measured speed: tuned, MOT17 + local)
+    flow_max:           float = 0.5      # most the learned lanes may turn a walker's heading (0–1)
     max_arrivals:       int   = 500
 
 
@@ -815,14 +818,14 @@ class CrowdForecaster:
             if born.any():
                 g0[born] = self._weidmann(rho[born])
                 v[born] = V[born]
-            speed_scale = np.clip(self._weidmann(rho) / np.maximum(g0, 1e-3), 0.0, 1.3)
+            speed_scale = np.clip(self._weidmann(rho) / np.maximum(g0, 1e-3), 0.0, p.weidmann_max_gain)
             for sub in range(p.substeps):
                 ts = t + sub * dt
                 # Heading: own heading, turning towards the scene's flow
                 e = e0
                 if flow is not None:
                     fd, fr = flow.at(P)
-                    beta = (1 - math.exp(-ts / p.heading_memory_s)) * fr
+                    beta = (1 - math.exp(-ts / p.heading_memory_s)) * fr * p.flow_max
                     beta = np.where(np.einsum("ij,ij->i", fd, e0) > -0.2, beta, 0.0)  # never U-turn
                     e = (1 - beta)[:, None] * e0 + beta[:, None] * fd
                     en = np.linalg.norm(e, axis=1)

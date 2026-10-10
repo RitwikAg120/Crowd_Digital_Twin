@@ -398,8 +398,11 @@ class TrackSource:
             z = zm.index_many(ground.to_image(pts))
             return np.where(floor.depth(pts).min(axis=1) >= -1e-6, z, -1)
 
-        src = cls(Path(path).parent.name if Path(path).name in ("tracks.txt", "gt.txt")
-                  else Path(path).stem, frames, floor, zone_of, len(zm.zones),
+        pp = Path(path)
+        # MOT17 ground truth is <SEQ>/gt/gt.txt: name it after the sequence, not "gt"
+        # (three sequences called "gt" overwrote each other in the results)
+        name = (pp.parent.parent.name if pp.parent.name == "gt" else pp.parent.name)             if pp.name in ("tracks.txt", "gt.txt") else pp.stem
+        src = cls(name, frames, floor, zone_of, len(zm.zones),
                   Config.FRAME_SKIP / rep.fps)
         src.ground_note = why
         return src
@@ -427,7 +430,22 @@ class _OldVelocity:
 
 
 FORECAST_MODELS = ("persistence", "constant_velocity", "old_twin", "new_twin",
-                   "new_uncalibrated", "new_no_flow", "new_no_arrivals")
+                   "new_uncalibrated", "new_no_flow", "new_no_arrivals",
+                   "new_no_walk_gate", "new_no_avoidance", "new_no_weidmann")
+
+
+def _ablated(params: ForecastParams) -> dict:
+    """The forecast with one component switched off at a time."""
+    from dataclasses import replace
+    return {
+        # everyone who moves at all walks (no speed / significance gate)
+        "new_no_walk_gate": replace(params, walk_min_speed=0.0, walk_ramp=1e-6,
+                                    walk_z_lo=-2.0, walk_z_hi=-1.0),
+        # nobody steps aside for people they are about to meet
+        "new_no_avoidance": replace(params, ttc_k=0.0),
+        # walking speed does not drop with local density
+        "new_no_weidmann": replace(params, weidmann_gamma=1e6),
+    }
 
 
 def _zone_counts(src: TrackSource, paths: np.ndarray, active=None) -> np.ndarray:
@@ -453,6 +471,7 @@ def _forecast_source(src: TrackSource, params: ForecastParams, every_s: float,
     skill = ForecastSkill(params.steps, params.step_s)
     sfm = SocialForceModel()
     fc = CrowdForecaster(params)
+    ablations = {k: CrowdForecaster(p) for k, p in _ablated(params).items()}
     poly = src.floor.vertices if src.floor.valid else None
     steps = params.steps
     ahead = np.arange(steps + 1)[None, :, None] * params.step_s
@@ -493,6 +512,9 @@ def _forecast_source(src: TrackSource, params: ForecastParams, every_s: float,
                 args = dict(floor=src.floor, flow=flow, arrivals=arrivals)
                 args.update(kw)
                 r = fc.run(pos, vel, std, **args)
+                runs[name] = (r.paths, _zone_counts(src, r.paths, r.active()))
+            for name, f in ablations.items():
+                r = f.run(pos, vel, std, floor=src.floor, flow=flow, arrivals=arrivals)
                 runs[name] = (r.paths, _zone_counts(src, r.paths, r.active()))
             raw = runs["new_uncalibrated"][1]
             runs["new_twin"] = (runs["new_uncalibrated"][0], skill.calibrate(zc, raw))

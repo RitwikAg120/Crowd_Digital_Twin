@@ -242,7 +242,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   <div class="kv-row"><span class="kv-k">Mean conf</span><span class="kv-v" id="kv-mconf">—</span></div>
   <div class="kv-row"><span class="kv-k">Frame skip</span><span class="kv-v">Every 2nd</span></div>
   <div class="kv-row"><span class="kv-k">Horizon</span><span class="kv-v">20 s</span></div>
-  <div class="kv-row"><span class="kv-k">Zones</span><span class="kv-v">2×3 grid</span></div>
+  <div class="kv-row"><span class="kv-k">Zones</span><span class="kv-v" title="6 zones of equal floor area: far row A–C, near row D–F">6 × equal m²</span></div>
   <div class="kv-row"><span class="kv-k">Ground</span><span class="kv-v" id="kv-ground">—</span></div>
   <div class="kv-row" title="Dense mode: heads at high resolution (and head points, if the dense model is installed) for crowds where bodies are hidden"><span class="kv-k">Dense mode</span><span class="kv-v" id="kv-dense">—</span></div>
   <div class="kv-row" title="People found by their body box / only their head / a head point"><span class="kv-k">Found by</span><span class="kv-v" id="kv-found">—</span></div>
@@ -270,6 +270,11 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
 
 <!-- MAIN CONTENT -->
 <div class="main">
+  <div class="scen-bar" id="cam-bar" style="display:none">
+    <span style="font-size:10px;color:var(--text3);font-family:var(--mono);flex-shrink:0">CAMERA</span>
+    <span id="cam-btns" style="display:contents"></span>
+    <span id="site-msg" style="font-size:10px;color:var(--text2);font-family:var(--mono)"></span>
+  </div>
   <div class="scen-bar" id="src-bar" style="display:none">
     <span style="font-size:10px;color:var(--text3);font-family:var(--mono);flex-shrink:0">SOURCE</span>
     <span id="src-btns" style="display:contents"></span>
@@ -670,6 +675,26 @@ function connect(){
 setText('ws-url',WS_URL);
 connect();
 loadSources();
+// ── Cameras (several sources): switch the one on screen; site total across all ──
+async function loadCameras(){
+  try{
+    const c=await (await fetch('/api/cameras')).json();
+    const bar=document.getElementById('cam-bar');
+    if(!c.cameras||c.cameras.length<2){bar.style.display='none';return}
+    const box=document.getElementById('cam-btns');box.innerHTML='';
+    c.cameras.forEach(k=>{
+      const b=document.createElement('button');
+      b.className='scen-btn'+(k.on_air?' active':'');
+      b.textContent=`${k.id} · ${k.people??'—'}`;b.title=k.source;
+      b.onclick=async()=>{await fetch('/api/camera',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:k.id})});loadCameras();loadSources();};
+      box.appendChild(b);
+    });
+    const s=await (await fetch('/api/site')).json();
+    setText('site-msg',`site: ${s.unique_people} people`+(s.placed?` (${s.seen_twice} seen by two cameras, counted once)`:' (cameras added up; no --site file)'));
+    bar.style.display='flex';
+  }catch(e){console.warn(e)}
+}
+loadCameras();setInterval(loadCameras,3000);
 </script>
 </body>
 </html>

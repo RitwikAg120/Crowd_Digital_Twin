@@ -12,7 +12,8 @@ zone risk scoring and a live WebSocket dashboard.
 | `main.py`                  | The full 15-layer (A–O) CDT pipeline + FastAPI/WebSocket server          |
 | `forecast.py`              | Layer K — motion filter, what the twin learns about the scene, the 20 s forecast and its self-check |
 | `dense.py`                 | Dense-crowd head points (P2PNet); used when `weights/p2pnet_crowd_jhu.pth` (or `_crowd.pth`) exists |
-| `iot.py`                   | Gate counters (Stream 2) over HTTP (`POST /api/iot`) or MQTT              |
+| `iot.py`                   | Optional gate counters (Stream 2, `--iot`) over HTTP (`POST /api/iot`) or MQTT |
+| `multicam.py`              | Multi-camera site fusion: cameras on one site map, people in overlapping views counted once |
 | `evaluate.py`              | Layer N — benchmarks and accuracy metrics; results go to `results/`      |
 | `train_dense.py`           | Trains the dense-crowd point model (run on the GB10)                     |
 | `export.py`                | TensorRT / ONNX export for Jetson or the GB10 (run on the target)        |
@@ -84,7 +85,10 @@ Other sources and options:
 python main.py --source 0                          # webcam
 python main.py --source rtsp://<ip>:554/stream     # IP camera
 python main.py --calibration calibration/cam1.json # measured ground calibration (see §4)
-python main.py --hfov 80                           # camera's field of view, for the automatic estimate
+python main.py --hfov 80                           # camera's field of view across the image's long side
+python main.py --source videos/a.mp4 --source rtsp://<ip>/2   # several cameras (one twin each)
+python main.py --source a.mp4 --source b.mp4 --site site.json  # … placed on one site map (see §4)
+python main.py --iot                               # turn on the (optional) IoT gate counters
 python main.py --device cpu                        # default: auto (CUDA when available)
 ```
 
@@ -96,6 +100,10 @@ curl http://localhost:8000/api/fusion_log # last 20 fusion results
 curl http://localhost:8000/api/sources    # videos the dashboard can switch to
 curl -X POST -H "Content-Type: application/json" -d '{"name":"demo.mp4"}' http://localhost:8000/api/source
 curl http://localhost:8000/api/twin       # 3D twin: scene (floor, walls, zones, camera), crowd state, 20 s forecast
+curl http://localhost:8000/api/cameras    # every camera, and which one is on screen
+curl -X POST -H "Content-Type: application/json" -d '{"id":"cam2"}' http://localhost:8000/api/camera
+curl http://localhost:8000/api/site       # everyone all cameras see, overlaps counted once
+curl http://localhost:8000/api/frame.jpg  # latest raw camera frame (the 3D twin's floor texture)
 ```
 
 ## 3. Models
@@ -147,11 +155,18 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
      single-view metrology): a person's pixel height grows linearly with how
      far below the horizon their feet are, which gives the camera's height and
      tilt. It runs on the first ~20–300 frames, needs ~300 unobstructed
-     full-body boxes, assumes a `--hfov` of 65° and people 1.7 m tall, and is
-     saved to `calibration/auto_<video>.json` for reuse with `--calibration`.
+     full-body boxes, assumes people 1.676 m (5'6") tall and a 65° field of
+     view across the image's **long** side (so a portrait phone video is
+     modelled with its real ~39° width), and is saved to
+     `calibration/auto_<video>.json` and reused on the next run.
      In dense crowds, where bodies are hidden, head boxes do the same job
-     (heads are `HEAD_SIZE_M` = 0.25 m and sit on a plane 1.45 m above the
-     floor); they are used first when they outnumber bodies 3 to 1.
+     (heads are `HEAD_SIZE_M` = 0.25 m and sit at chin height). Perspective is
+     measured across rows, so whole bodies are the ruler when their feet
+     spread over ≥ 15 % of the image height (`CALIB_MIN_SPAN`), otherwise
+     heads. If the sizes do not grow towards the camera (a packed crowd, where
+     near boxes are cut off and far ones inflated) the estimate is refused
+     rather than guessed. The field of view cannot be recovered from box
+     sizes (every value fits equally well), so it stays an assumption.
      A wrong field of view mostly scales the depth direction (a 50° vs 80°
      guess changes far-zone areas by up to ~2×).
   3. A flat `--scene-width-m × --scene-height-m` scale (40 × 22.5 m) when
@@ -160,9 +175,33 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
   The floor's far edge is learned from where people's feet have been seen:
   the image above it (walls, sky) is not counted as floor. It only ever moves
   up. The dashboard's **Ground** row shows which calibration is active.
-- **Zones and risk.** Zone capacity is the head-count at 0.8 p/m² (Fruin LOS
-  F), where the density risk term saturates; the speed term saturates at
-  3 m/s (running) and uses each zone's median speed.
+- **Zones and risk.** Zones are cut on the floor, not the image: the
+  walkable floor in view is split into 2 depth bands of equal floor area,
+  and each band into 3 parts of equal area, so every zone covers the same
+  square metres however the camera looks at it (far row A–C, near row D–F).
+  People are assigned by where they stand, in metres. Zone capacity is the
+  head-count at 0.8 p/m² (Fruin LOS F), where the density risk term
+  saturates; the speed term saturates at 3 m/s (running) and uses each
+  zone's median speed.
+- **3D twin.** The live camera image is laid on the twin's floor through the
+  calibration (**Video floor**, `V`): every floor cell is textured from the
+  pixels that show it, so the twin's people, zones and walls sit on the real
+  scene, and the **CCTV view** looks through the real camera. Obstacles (floor
+  nobody walks on) are only learned where a person would be clearly visible
+  (`OBSTACLE_MIN_PERSON_PX`), so far floor where the detector misses people
+  is not mistaken for an obstacle.
+- **Several cameras.** Repeat `--source` for each camera: each gets its own
+  calibration, twin and forecast (they share one copy of the models). The
+  dashboard switches between them and shows the site total. A site file
+  (`--site site.json`) places the cameras on one map —
+  `{"merge_radius_m": 0.6, "cameras": {"cam1": {"x": 0, "y": 0, "yaw_deg": 0},
+  "cam2": {"x": 12, "y": 30, "yaw_deg": 180}}}` (x, y: the point under the
+  camera; yaw: where it looks, counter-clockwise from the site's +Y) — and
+  people seen by two cameras in an overlap are counted once (`/api/site`).
+- **Dense mode speed.** In dense mode the 2560 px head detector and the
+  head-point model take turns (`DENSE_ALTERNATE`), each reusing the other's
+  last result, which saves one heavy model per frame; packed crowds move
+  only a few pixels between processed frames.
 - **Fusion (A).** IoT gate counters are optional and off by default: without
   them the fused count is the video count (κ = 1). Start with `--iot` (or
   `--mqtt`) to turn them on; then `C_f = 0.70·C_video + 0.30·C_iot`,
