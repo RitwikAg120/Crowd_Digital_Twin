@@ -46,7 +46,7 @@ model of the crowd on the real ground plane, in metres.
 From that twin, from **real detections** (not mocked numbers):
 
 - **Tracked person count** and a *fused* count (vision + IoT).
-- **Per-zone occupancy, density (persons/m²) and directional flow** over a 2×3 grid.
+- **Per-zone occupancy, density (persons/m²) and directional flow** over six zones of equal floor area (2 depth bands × 3), measured on the ground.
 - A **trend** (GROWING / STABLE / DISPERSING) by linear regression on the count.
 - A **confidence-weighted risk score** (LOW / MEDIUM / HIGH), global and per zone.
 - **Zone alerts** and a scrolling incident feed for an operator.
@@ -163,9 +163,9 @@ forecast physics are in `forecast.ForecastParams`. The main ones:
 | Pipeline | `FRAME_SKIP` | `2` | Process every Nth source frame |
 | Pipeline | `FRAME_WIDTH/HEIGHT` | `1280×720` | Max working resolution |
 | Pipeline | `STABILIZE` | `True` | Camera-motion compensation (auto-on when the view moves) |
-| Calibration | `AUTO_CALIBRATE` / `CAMERA_HFOV_DEG` / `PERSON_HEIGHT_M` | `True` / `65°` / `1.7 m` | Auto ground estimate assumptions |
+| Calibration | `AUTO_CALIBRATE` / `CAMERA_HFOV_DEG` / `PERSON_HEIGHT_M` / `CALIB_MIN_SPAN` | `True` / `65°` (long side) / `1.676 m` (5′6″) / `0.15` | Auto ground estimate assumptions |
 | Calibration | `SCENE_WIDTH_M × SCENE_HEIGHT_M` | `40 × 22.5 m` | Flat fallback scale |
-| Zones | `ZONE_ROWS × ZONE_COLS` | `2×3` | Zone grid |
+| Zones | `ZONE_ROWS × ZONE_COLS` | `2×3` | Depth bands × parts, each of equal floor area |
 | Risk | `DENSITY_HIGH` / `SPEED_HIGH` | `0.40 p/m²` / `1.5 m/s` | Risk terms saturate at 2× (0.8 p/m² = Fruin LOS F; 3 m/s) |
 | Forecast | `PRED_HORIZON × SIM_STEP_S` | `25 × 0.8 s` = 20 s | Horizon; `SIM_SUBSTEPS` = 4 |
 | Forecast | `TRACKER_BUFFER` | `30` | Processed frames a lost track stays in the twin |
@@ -308,10 +308,13 @@ can cover 10× the floor of one at the bottom. The calibration comes from, in or
 2. **Automatic estimate** (`PedestrianCalibrator`, single-view metrology): a
    person's pixel height grows linearly with how far below the horizon their feet
    are, giving the camera's height and tilt. It runs on the first ~20–300 frames,
-   needs ~300 unobstructed full-body boxes, assumes `CAMERA_HFOV_DEG` (65°) and
-   `PERSON_HEIGHT_M` (1.7 m), and is saved to `calibration/auto_<video>.json` for
-   reuse. In dense crowds, head boxes do the same job (heads are `HEAD_SIZE_M` =
-   0.25 m on a plane 1.45 m up) once they outnumber bodies.
+   needs ~300 unobstructed full-body boxes, assumes `CAMERA_HFOV_DEG` (65° across
+   the image's long side, so portrait video is modelled correctly) and
+   `PERSON_HEIGHT_M` (1.676 m, 5′6″), and is saved to `calibration/auto_<video>.json`
+   for reuse. Head boxes (`HEAD_SIZE_M` = 0.25 m, at chin height) do the same job;
+   bodies are the ruler when their feet spread over ≥ `CALIB_MIN_SPAN` (15 %) of the
+   image height, otherwise heads. Sizes that do not grow towards the camera are
+   refused rather than turned into a flat scale.
 3. **Flat scale** (`SCENE_WIDTH_M × SCENE_HEIGHT_M`, 40 × 22.5 m) when neither is
    available (overhead/drone or very sparse scenes).
 
@@ -364,7 +367,7 @@ page. Header with a live **source switcher** (the videos under `videos/`, webcam
 RTSP), a metrics row (tracked persons + sparkline, risk score, trend, simulation
 status), a left panel (model, tracker, FPS, latency, ground calibration, **dense
 mode**, how people were **found** — body/head/point), the live annotated feed with
-the 2×3 **zone grid** (count, fill vs capacity, risk, click for details), a right
+the six **zones** (count, fill vs capacity, risk, click for details), a right
 panel (incident alerts, fusion stream comparison, forecast capacity warnings) and a
 ticker. Auto-reconnects.
 
@@ -498,8 +501,10 @@ full pipeline runs at ~2–3 FPS; twin-only replay handles ~200 people at ~11 ms
   labelling by eye isn't possible at that resolution — closing the gap needs
   higher-resolution source footage or hand-labelled frames.
 - **Feet from heads** use 7 head-heights when there is no camera model.
-- **Automatic calibration** assumes a 65° field of view and 1.7 m people, and needs
-  unobstructed side-view full-body boxes; it can't estimate overhead/drone views.
+- **Automatic calibration** assumes a 65° field of view (long side) and 1.676 m
+  people; the field of view cannot be recovered from box sizes. It needs bodies or
+  heads spread over the image height; packed crowds whose boxes do not grow towards
+  the camera are refused.
 - **IoT stream is simulated** unless real gate counts are posted (`/api/iot`) or an
   MQTT broker is attached (`--mqtt`).
 - **Panic what-if** bodies are frictionless, so exit capacity is capped by rule
