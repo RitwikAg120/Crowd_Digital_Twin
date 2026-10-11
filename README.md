@@ -103,7 +103,6 @@ curl http://localhost:8000/api/twin       # 3D twin: scene (floor, walls, zones,
 curl http://localhost:8000/api/cameras    # every camera, and which one is on screen
 curl -X POST -H "Content-Type: application/json" -d '{"id":"cam2"}' http://localhost:8000/api/camera
 curl http://localhost:8000/api/site       # everyone all cameras see, overlaps counted once
-curl http://localhost:8000/api/frame.jpg  # latest raw camera frame (the 3D twin's floor texture)
 ```
 
 ## 3. Models
@@ -175,18 +174,13 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
   The floor's far edge is learned from where people's feet have been seen:
   the image above it (walls, sky) is not counted as floor. It only ever moves
   up. The dashboard's **Ground** row shows which calibration is active.
-- **Zones and risk.** Zones are cut on the floor, not the image: the
-  walkable floor in view is split into 2 depth bands of equal floor area,
-  and each band into 3 parts of equal area, so every zone covers the same
-  square metres however the camera looks at it (far row A–C, near row D–F).
-  People are assigned by where they stand, in metres. Zone capacity is the
+- **Zones and risk.** The image is split into a 2 × 3 grid of equal
+  rectangles (top row A–C, bottom row D–F); each zone's floor area comes
+  from the calibration, with perspective. Zone capacity is the
   head-count at 0.8 p/m² (Fruin LOS F), where the density risk term
   saturates; the speed term saturates at 3 m/s (running) and uses each
   zone's median speed.
-- **3D twin.** The live camera image is laid on the twin's floor through the
-  calibration (**Video floor**, `V`): every floor cell is textured from the
-  pixels that show it, so the twin's people, zones and walls sit on the real
-  scene, and the **CCTV view** looks through the real camera. Obstacles (floor
+- **3D twin.** The **CCTV view** looks through the real camera. Obstacles (floor
   nobody walks on) are only learned where a person would be clearly visible
   (`OBSTACLE_MIN_PERSON_PX`), so far floor where the detector misses people
   is not mistaken for an obstacle.

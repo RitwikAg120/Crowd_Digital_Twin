@@ -153,17 +153,18 @@ def test_stream_urls_the_switcher_accepts():
         assert stream_source(bad) is None, bad
 
 
-def test_zones_cover_equal_floor_areas():
+def test_zones_are_an_image_grid():
     from main import ZoneManager
     g = GroundPlane.from_camera(596, 1280, 5.2, 19.0, 65.0)
     g.floor_top = 90.0
     zm = ZoneManager(596, 1280, g)
-    areas = [z.area_m2 for z in zm.zones.values()]
-    assert max(areas) - min(areas) < 0.01 * max(areas), areas
-    # far zones are the top of the image, near zones the bottom; feet go to the zone they stand in
-    assert zm.assign(640, 580) == "Zone_E" and zm.assign(640, 120) == "Zone_B",         (zm.assign(640, 580), zm.assign(640, 120))
+    # 2 rows × 3 columns of equal image rectangles; near zones cover less floor
+    assert zm.assign(640, 580) == "Zone_E" and zm.assign(640, 120) == "Zone_B"
     assert zm.assign(20, 590) == "Zone_D" and zm.assign(1260, 590) == "Zone_F"
-    return f"6 zones of {areas[0]:.0f} m²"
+    assert list(zm.index_many([[640, 580], [20, 10]])) == [4, 0]
+    a = {n: z.area_m2 for n, z in zm.zones.items()}
+    assert a["Zone_B"] > a["Zone_E"] > 0, a
+    return f"far {a['Zone_B']:.0f} m², near {a['Zone_E']:.0f} m²"
 
 
 def test_saved_calibration_survives_the_resize_at_start():

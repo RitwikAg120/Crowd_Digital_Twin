@@ -204,7 +204,7 @@ class Config:
 
     # Output
     SEND_FRAME        = True       # False → heatmap without any video pixels in the payload
-    OVERLAY_DETAIL    = "clean"    # dashboard video: "clean" (boxes, feet, zones) or "full" (+ ids, heads)
+    OVERLAY_DETAIL    = "clean"    # dashboard video: "clean" (zones, boxes, feet) or "full" (+ ids, heads)
     WS_HZ             = 10         # max broadcasts per second
     EXPERIENCE_MAX_GB = 2.0        # oldest experience logs/frames are deleted beyond this
 
@@ -701,14 +701,14 @@ class Agent:
 @dataclass
 class ZoneState:
     name:     str
-    x1:       int                      # bounding box of the zone in the image (px)
+    x1:       int                      # the zone's rectangle in the image (px)
     y1:       int
     x2:       int
     y2:       int
     capacity: int   = 50
     area_m2:  float = 0.0
-    polygon:  Optional[np.ndarray] = None   # the zone on the floor (m), convex
-    image_polygon: Optional[np.ndarray] = None   # the same, in the image (px)
+    polygon:  Optional[np.ndarray] = None   # its walkable ground (m)
+    image_polygon: Optional[np.ndarray] = None   # its rectangle as a polygon (px)
 
     @property
     def area(self) -> float:
@@ -723,46 +723,12 @@ class ZoneState:
         return (self.y1 + self.y2) // 2
 
 
-def _poly_area(p: np.ndarray) -> float:
-    if len(p) < 3:
-        return 0.0
-    x, y = p[:, 0], p[:, 1]
-    return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
-
-
-def _equal_area_cuts(poly: np.ndarray, axis: int, n: int) -> List[float]:
-    """Values v_1 < … < v_(n−1) of coordinate `axis` that cut a convex polygon
-    into n slices of equal area."""
-    lo, hi = float(poly[:, axis].min()), float(poly[:, axis].max())
-    total, cuts = _poly_area(poly), []
-    for k in range(1, n):
-        target, a, b = total * k / n, lo, hi
-        for _ in range(50):                                  # bisection on the slice area
-            m = (a + b) / 2
-            part = GroundPlane._clip_half(poly, lambda p, m=m: m - p[:, axis])
-            a, b = (m, b) if _poly_area(part) < target else (a, m)
-        cuts.append((a + b) / 2)
-    return cuts
-
-
-def _slab(poly: np.ndarray, axis: int, lo: Optional[float], hi: Optional[float]) -> np.ndarray:
-    if lo is not None:
-        poly = GroundPlane._clip_half(poly, lambda p: p[:, axis] - lo)
-    if hi is not None:
-        poly = GroundPlane._clip_half(poly, lambda p: hi - p[:, axis])
-    return poly
-
-
 # ─── Zone Manager ─────────────────────────────────────────────────────────────
 
 class ZoneManager:
     """
-    Zones on the floor, not on the image: the walkable floor in view (clipped at
-    the learned far edge) is cut into ROWS depth bands of equal floor area, and
-    each band into COLS parts of equal area, so every zone covers the same
-    number of square metres however the camera looks at it. Zone_A … Zone_C are
-    the far band (top of the image), Zone_D … Zone_F the near one. People are
-    assigned by where they stand, in metres.
+    A ROWS × COLS grid of equal rectangles on the image. Each zone's floor area
+    (and so its capacity) comes from the ground plane, with perspective.
     """
     def __init__(self, h: int, w: int, ground: GroundPlane,
                  rows: int = Config.ZONE_ROWS, cols: int = Config.ZONE_COLS):
@@ -770,80 +736,44 @@ class ZoneManager:
         self.ground = ground
         self.h, self.w = h, w
         self.rows, self.cols = rows, cols
-        floor = ground.visible_ground()
-        bands = []
-        if _poly_area(floor) > 1e-6:
-            ycut = _equal_area_cuts(floor, 1, rows)[::-1]     # far band first
-            edges = [None] + ycut + [None]
-            for r in range(rows):
-                hi, lo = edges[r], edges[r + 1]               # far → near: y from high to low
-                bands.append(_slab(floor, 1, lo, hi))
-        for r in range(rows):
-            band = bands[r] if bands else np.zeros((0, 2))
-            xcut = _equal_area_cuts(band, 0, cols) if _poly_area(band) > 1e-6 else []
-            xe = [None] + xcut + [None]
-            for c in range(cols):
-                name = self.names(rows, cols)[r * cols + c]
-                poly = _slab(band, 0, xe[c], xe[c + 1]) if xcut or cols == 1 else np.zeros((0, 2))
-                img = ground.to_image(poly) if len(poly) else np.zeros((0, 2))
-                if len(img):
-                    x1, y1 = np.floor(img.min(0)).astype(int)
-                    x2, y2 = np.ceil(img.max(0)).astype(int)
-                else:
-                    x1 = y1 = x2 = y2 = 0
-                z = ZoneState(name=name, x1=int(x1), y1=int(y1), x2=int(x2), y2=int(y2),
-                              polygon=poly, image_polygon=img)
-                z.area_m2  = _poly_area(poly)
-                # Capacity = persons at the Fruin LOS F density (2 × DENSITY_HIGH)
-                z.capacity = max(10, int(z.area_m2 * Config.DENSITY_HIGH * 2))
-                self.zones[name] = z
-        self._names = list(self.zones)
-        # Half-plane form of each convex zone, for vectorised assignment
-        self._half = []
-        for z in self.zones.values():
-            p = z.polygon if z.polygon is not None and len(z.polygon) >= 3 else None
-            if p is None:
-                self._half.append(None)
-                continue
-            if np.cross(p[1] - p[0], p[2] - p[1]) < 0:        # make it counter-clockwise
-                p = p[::-1]
-            e = np.roll(p, -1, axis=0) - p
-            n = np.stack([-e[:, 1], e[:, 0]], 1)              # inward normals (CCW)
-            self._half.append((n, np.einsum("ij,ij->i", n, p)))
-        cent = [z.polygon.mean(0) if z.polygon is not None and len(z.polygon) else np.full(2, np.inf)
-                for z in self.zones.values()]
-        self._centres = np.array(cent, float).reshape(-1, 2)
+        self.rh, self.cw = rh, cw = h // rows, w // cols
+        for idx, name in enumerate(self.names(rows, cols)):
+            r, c = divmod(idx, cols)
+            z = ZoneState(
+                name=name,
+                x1=c * cw,
+                y1=r * rh,
+                x2=(c + 1) * cw if c < cols - 1 else w,
+                y2=(r + 1) * rh if r < rows - 1 else h,
+            )
+            rect = [[z.x1, z.y1], [z.x2, z.y1], [z.x2, z.y2], [z.x1, z.y2]]
+            z.image_polygon = np.array(rect, float)
+            z.polygon = ground.to_world(ground.clip(rect))     # walkable ground under it (m)
+            # Ground area under the zone, with perspective
+            z.area_m2  = ground.area_m2(rect)
+            # Capacity = persons at the Fruin LOS F density (2 × DENSITY_HIGH)
+            z.capacity = max(10, int(z.area_m2 * Config.DENSITY_HIGH * 2))
+            self.zones[name] = z
 
     @staticmethod
     def names(rows: int = Config.ZONE_ROWS, cols: int = Config.ZONE_COLS) -> List[str]:
         return [f"Zone_{'ABCDEFGHIJKLMNOP'[i]}" for i in range(rows * cols)]
 
-    def index_world(self, pts) -> np.ndarray:
-        """Zone index (in names() order) for (N, 2) ground points in metres;
-        points off the floor go to the nearest zone."""
-        p = np.asarray(pts, float).reshape(-1, 2)
-        out = np.full(len(p), -1, int)
-        for i, hp in enumerate(self._half):
-            if hp is None:
-                continue
-            n, off = hp
-            inside = np.all(p @ n.T >= off - 1e-6, axis=1) & (out < 0)
-            out[inside] = i
-        miss = out < 0
-        if miss.any() and np.isfinite(self._centres).any():
-            d = np.linalg.norm(p[miss, None, :] - self._centres[None], axis=2)
-            out[miss] = np.argmin(d, axis=1)
-        return np.maximum(out, 0)
+    def assign(self, cx: float, cy: float) -> str:
+        # Feet on (or just past) the frame edge belong to the edge zone
+        cx = min(max(cx, 0), self.w - 1)
+        cy = min(max(cy, 0), self.h - 1)
+        for name, z in self.zones.items():
+            if z.x1 <= cx < z.x2 and z.y1 <= cy < z.y2:
+                return name
+        return "Zone_X"
 
     def index_many(self, pts) -> np.ndarray:
         """Zone index (in names() order) for (N, 2) image points."""
         p = np.asarray(pts, float).reshape(-1, 2)
-        if not len(p):
-            return np.zeros(0, int)
-        return self.index_world(self.ground.to_world(p))
-
-    def assign(self, cx: float, cy: float) -> str:
-        return self._names[int(self.index_many([[cx, cy]])[0])]
+        c = np.minimum((np.clip(p[:, 0], 0, self.w - 1) // self.cw).astype(int), self.cols - 1)
+        r = np.minimum((np.clip(p[:, 1], 0, self.h - 1) // self.rh).astype(int), self.rows - 1)
+        return r * self.cols + c
 
     def polygons(self) -> Dict[str, np.ndarray]:
         """Each zone's walkable ground in view, as a polygon in metres."""
@@ -1867,7 +1797,6 @@ class TwinPipeline:
         self._last_broadcast = 0.0
         self._running        = False
         self.latest_payload: Optional[dict] = None
-        self.latest_frame: Optional[np.ndarray] = None   # raw frame, for the 3D twin's floor
         self.on_air = True                       # multi-camera: only the selected one broadcasts
         self.camera_id = "cam1"
         # Latest crowd state in metres, read by the 3D twin (TwinService)
@@ -2016,12 +1945,6 @@ class TwinPipeline:
             "obstacles":   np.round(self.obstacles, 2).tolist(),     # cell centres, metres
             "obstacle_cell": round(self.memory.cell, 2),
             "frame_size":  [self._w, self._h],
-            # image → ground homography and the floor's far edge, so the twin can
-            # lay the camera image on its floor
-            "homography":  np.round(ground.H, 9).tolist(),
-            "floor_top":   ground.floor_top,
-            "w_min":       ground.w_min,
-            "video":       bool(Config.SEND_FRAME),
             "horizon_s":   round(Config.PRED_HORIZON * Config.SIM_STEP_S, 1),
         }
         return self._scene_cache
@@ -2169,24 +2092,19 @@ class TwinPipeline:
             overlay = heat_color
         full = Config.OVERLAY_DETAIL == "full"
 
-        # ── Zones: the floor area each one covers, filled by its risk ─────
-        zone_col = {"HIGH": (50, 50, 230), "MEDIUM": (0, 165, 255), "LOW": (90, 210, 90)}
-        fills = overlay.copy()
-        polys = []
+        # ── Zones: the image grid, outlined by risk ─────────────────────
         for z in self.zone_mgr.zones.values():
-            corners = z.image_polygon
-            if corners is None or len(corners) < 3:
-                continue
-            corners = np.asarray(corners, float)
+            rl  = zone_risks[z.name]["risk_label"]
+            col = {"HIGH": (50, 50, 220),
+                    "MEDIUM": (0, 165, 255),
+                    "LOW":    (80, 200, 80)}.get(rl, (128, 128, 128))
+            corners = np.array([[z.x1, z.y1], [z.x2, z.y1], [z.x2, z.y2], [z.x1, z.y2]], float)
             if moving:
                 corners = apply_transform(from_ref, corners)
-            pts = corners.round().astype(np.int32)
-            col = zone_col.get(zone_risks[z.name]["risk_label"], (128, 128, 128))
-            cv2.fillPoly(fills, [pts], col)
-            polys.append((z, pts, col))
-        overlay = cv2.addWeighted(fills, 0.16, overlay, 0.84, 0)
-        for z, pts, col in polys:
-            cv2.polylines(overlay, [pts], True, col, 2, cv2.LINE_AA)
+            cv2.polylines(overlay, [corners.round().astype(np.int32)], True, col, 2)
+            cv2.putText(overlay, f"{z.name}: {rl}",
+                        (int(corners[0, 0]) + 6, int(corners[0, 1]) + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
 
         # ── People: a thin box and a dot at the feet; ids only in full detail ──
         for det in det_list:
@@ -2207,17 +2125,6 @@ class TwinPipeline:
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 0, 255), 1)
         for a in agents_now:
             cv2.circle(overlay, (int(a.x), int(a.y)), 2 if self.dense else 3, (0, 0, 255), -1, cv2.LINE_AA)
-
-        # Zone labels last, on a dark tag so they stay readable over the crowd
-        for z, pts, col in polys:
-            txt = f"{z.name.replace('Zone_', '')}  {z_counts.get(z.name, 0)}/{z.capacity}"
-            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cx, cy = pts.mean(0).astype(int)
-            cx = int(np.clip(cx, tw // 2 + 4, self._w - tw // 2 - 4))
-            cy = int(np.clip(cy, th + 6, self._h - 6))
-            cv2.rectangle(overlay, (cx - tw // 2 - 4, cy - th - 5), (cx + tw // 2 + 4, cy + 5), (20, 20, 20), -1)
-            cv2.rectangle(overlay, (cx - tw // 2 - 4, cy - th - 5), (cx + tw // 2 + 4, cy + 5), col, 1)
-            cv2.putText(overlay, txt, (cx - tw // 2, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
 
         _, buf        = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 72])
         annotated_b64 = base64.b64encode(buf).decode()
@@ -2336,8 +2243,6 @@ class TwinPipeline:
             },
         }
         self.latest_payload = payload
-        if frame is not None:
-            self.latest_frame = frame
 
         # ── Crowd state in metres for the 3D twin (one atomic swap) ───────
         zone_ix = {n: i for i, n in enumerate(self.zone_mgr.zones)}
@@ -3239,17 +3144,6 @@ async def site_info():
     fused = (site or SiteFusion()).fuse(pos)
     fused.pop("people") if len(fused["people"]) > 2000 else None
     return fused
-
-
-@app.get("/api/frame.jpg")
-async def frame_jpg():
-    """The latest raw camera frame (no overlays) — the 3D twin's floor texture."""
-    from fastapi.responses import Response
-    f = pipeline.latest_frame if pipeline is not None else None
-    if f is None or not Config.SEND_FRAME:
-        raise HTTPException(404, "No video frame (twin-only mode, or SEND_FRAME is off)")
-    ok, buf = await asyncio.to_thread(cv2.imencode, ".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 70])
-    return Response(buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/twin")

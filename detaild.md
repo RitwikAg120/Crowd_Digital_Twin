@@ -46,7 +46,7 @@ model of the crowd on the real ground plane, in metres.
 From that twin, from **real detections** (not mocked numbers):
 
 - **Tracked person count** and a *fused* count (vision + IoT).
-- **Per-zone occupancy, density (persons/m²) and directional flow** over six zones of equal floor area (2 depth bands × 3), measured on the ground.
+- **Per-zone occupancy, density (persons/m²) and directional flow** over a 2 × 3 grid of image zones, with each zone's floor area measured on the ground.
 - A **trend** (GROWING / STABLE / DISPERSING) by linear regression on the count.
 - A **confidence-weighted risk score** (LOW / MEDIUM / HIGH), global and per zone.
 - **Zone alerts** and a scrolling incident feed for an operator.
@@ -165,7 +165,7 @@ forecast physics are in `forecast.ForecastParams`. The main ones:
 | Pipeline | `STABILIZE` | `True` | Camera-motion compensation (auto-on when the view moves) |
 | Calibration | `AUTO_CALIBRATE` / `CAMERA_HFOV_DEG` / `PERSON_HEIGHT_M` / `CALIB_MIN_SPAN` | `True` / `65°` (long side) / `1.676 m` (5′6″) / `0.15` | Auto ground estimate assumptions |
 | Calibration | `SCENE_WIDTH_M × SCENE_HEIGHT_M` | `40 × 22.5 m` | Flat fallback scale |
-| Zones | `ZONE_ROWS × ZONE_COLS` | `2×3` | Depth bands × parts, each of equal floor area |
+| Zones | `ZONE_ROWS × ZONE_COLS` | `2×3` | Image grid (rows × columns) |
 | Risk | `DENSITY_HIGH` / `SPEED_HIGH` | `0.40 p/m²` / `1.5 m/s` | Risk terms saturate at 2× (0.8 p/m² = Fruin LOS F; 3 m/s) |
 | Forecast | `PRED_HORIZON × SIM_STEP_S` | `25 × 0.8 s` = 20 s | Horizon; `SIM_SUBSTEPS` = 4 |
 | Forecast | `TRACKER_BUFFER` | `30` | Processed frames a lost track stays in the twin |
