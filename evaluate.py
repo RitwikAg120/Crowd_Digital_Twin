@@ -372,6 +372,7 @@ def match_heads(pred: np.ndarray, gt: np.ndarray) -> int:
 # The stock COCO weights, for the untuned-body variant. Not yolo26s.pt in the
 # repo root: that file is a copy of the fine-tuned model.
 COCO_BODY = "weights/yolo26s_coco.pt"
+SMALL_BODY = "weights/yolo26ntrained.pt"
 
 # (variant, what it changes against the full dense-mode counter)
 DETECT_VARIANTS = (
@@ -413,13 +414,15 @@ def detect(args) -> dict:
     if not samples:
         raise SystemExit("No labelled images found.")
     pipe = CDTPipeline(record_experience=False)
-    body_models = {"ft": pipe.fbox_model, "small": YOLO("weights/yolo26ntrained.pt")}
+    body_models = {"ft": pipe.fbox_model}
     variants = DETECT_VARIANTS
-    if Path(COCO_BODY).exists():
-        body_models["base"] = YOLO(COCO_BODY)
-    else:
-        print(f"  {COCO_BODY} not found: skipping body_untuned")
-        variants = tuple(v for v in variants if v[0] != "body_untuned")
+    # Optional weights: their variant is skipped when the file is missing
+    for key, w, v in (("base", COCO_BODY, "body_untuned"), ("small", SMALL_BODY, "body_small")):
+        if Path(w).exists():
+            body_models[key] = YOLO(w)
+        else:
+            print(f"  {w} not found: skipping {v}")
+            variants = tuple(x for x in variants if x[0] != v)
     point_models = {key: PointCounter(w, pipe.device, Config.DENSE_THRESHOLD, half=pipe.half, enhance=enh)
                     for key, w, enh in (("jhu", "weights/p2pnet_crowd_jhu.pth", True),
                                         ("jhu_plain", "weights/p2pnet_crowd_jhu.pth", False),
