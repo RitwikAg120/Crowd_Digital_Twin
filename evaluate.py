@@ -359,14 +359,40 @@ def match_heads(pred: np.ndarray, gt: np.ndarray) -> int:
     from its neighbours' spacing). Returns the number of matches.
     """
     from dense import head_sizes
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    from scipy.spatial import cKDTree
     from scipy.spatial.distance import cdist
     pred, gt = np.asarray(pred, float).reshape(-1, 2), np.asarray(gt, float).reshape(-1, 2)
     if not len(pred) or not len(gt):
         return 0
-    d = cdist(gt, pred)
-    cost = np.where(d <= head_sizes(gt)[:, None], d, 1e6)
-    r, c = linear_sum_assignment(cost)
-    return int((cost[r, c] < 1e6).sum())
+    tau = head_sizes(gt)
+    # Only pairs within a head size can match, so the assignment splits into
+    # small independent groups: solved one group at a time it stays exact and
+    # fast on frames with tens of thousands of heads (JHU-Crowd++).
+    near = cKDTree(pred).query_ball_point(gt, tau)
+    gi = np.repeat(np.arange(len(gt)), [len(n) for n in near])
+    pj = np.fromiter((j for n in near for j in n), int, len(gi))
+    if not len(gi):
+        return 0
+    n_g = len(gt)
+    graph = coo_matrix((np.ones(len(gi)), (gi, n_g + pj)), shape=(n_g + len(pred),) * 2)
+    _, label = connected_components(graph, directed=False)
+    order = np.argsort(label, kind="stable")              # nodes grouped by component
+    starts = np.flatnonzero(np.r_[True, np.diff(label[order]) != 0])
+    matched = 0
+    for nodes in np.split(order, starts[1:]):
+        g, p = nodes[nodes < n_g], nodes[nodes >= n_g] - n_g
+        if not len(g) or not len(p):
+            continue
+        if len(g) == 1 and len(p) == 1:                   # one pair within reach: a match
+            matched += 1
+            continue
+        d = cdist(gt[g], pred[p])
+        cost = np.where(d <= tau[g, None], d, 1e6)
+        r, c = linear_sum_assignment(cost)
+        matched += int((cost[r, c] < 1e6).sum())
+    return matched
 
 
 # The stock COCO weights, for the untuned-body variant. Not yolo26s.pt in the
