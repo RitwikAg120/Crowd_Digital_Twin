@@ -292,7 +292,9 @@ FPN decoder, and regression/classification heads predicting one offset + score p
 anchor. `weights/p2pnet_crowd_jhu.pth` (CrowdHuman + JHU-Crowd++) is preferred when
 present over `weights/p2pnet_crowd.pth` (CrowdHuman only); on JHU-Crowd++
 validation the JHU model counts 82 % of people (MAE 78) vs 43 % (MAE 175) for the
-CrowdHuman-only one. Inference is FP16 on CUDA, else CPU.
+CrowdHuman-only one. Inference is FP16 on CUDA, else CPU. The default stays
+site-neutral (public data only); a model fine-tuned on one site's frames, such
+as `p2pnet_crowd_kumbh.pth`, is used only when passed with `--dense-model`.
 
 ---
 

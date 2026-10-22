@@ -97,12 +97,12 @@ class Config:
     DENSE_HEAD_RATIO  = 2.0        # … and they are ≥ this many times the bodies
     HBOX_IMGSZ_DENSE  = 2560       # head detector input in dense mode (3–10 px heads)
     HBOX_CONF_DENSE   = 0.15
-    # Head-point model (dense.py), used if present, best first: the Kumbh-adapted
-    # model (CrowdHuman + JHU-Crowd++ + labelled Kumbh frames), then the JHU one,
-    # then CrowdHuman-only. On the same gold JHU+CrowdHuman val, the Kumbh model
-    # beats the JHU one (overall MAE 8.7 vs 9.5, JHU counted 94% vs 89%).
-    DENSE_MODEL       = next((w for w in ("weights/p2pnet_crowd_kumbh.pth",
-                                          "weights/p2pnet_crowd_jhu.pth",
+    # Head-point model (dense.py), used if present: the JHU one (CrowdHuman +
+    # JHU-Crowd++, public data only), else CrowdHuman-only. The default stays
+    # site-neutral; a model fine-tuned on one site's frames (e.g.
+    # p2pnet_crowd_kumbh.pth) is opt-in with --dense-model. That Kumbh model
+    # overcounts its own training frames by 10 % (evaluate.py detect).
+    DENSE_MODEL       = next((w for w in ("weights/p2pnet_crowd_jhu.pth",
                                           "weights/p2pnet_crowd.pth") if Path(w).exists()),
                              "weights/p2pnet_crowd.pth")
     DENSE_THRESHOLD   = 0.5        # head score for a point

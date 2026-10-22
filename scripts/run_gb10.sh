@@ -85,10 +85,10 @@ if [ "$WHAT" = measure ] || [ "$WHAT" = all ]; then
 fi
 
 if [ "$WHAT" = train ] || [ "$WHAT" = all ]; then
-  # 5. Dense-crowd point model on CrowdHuman heads (+ your own labelled frames, if any)
+  # 5. Dense-crowd point model on CrowdHuman heads. Public data only: a model
+  #    fine-tuned on one site's frames is a separate, opt-in step (train_dense.py)
   if [ "$CROWDHUMAN_OK" = 1 ]; then
     TRAIN=("${CH[@]}")
-    [ "$KUMBH_POINTS_OK" = 1 ] && TRAIN+=(--data points:dataset/kumbh_points)
     AMP=(); [ "$DEVICE" != cpu ] && AMP=(--amp)
     # Up to 100 epochs, stopping once 5 in a row bring no better validation MAE;
     # a rerun continues where the last one stopped (--resume)

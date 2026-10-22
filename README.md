@@ -292,9 +292,13 @@ bash scripts/run_gb10.sh [measure|mot17|train|jhu|all]   # benchmarks, evaluatio
 CrowdHuman (crowdhuman.org) and JHU-Crowd++ (crowd-counting.com) need their
 licences accepted, so `fetch_datasets.py` only checks they are unpacked under
 `dataset/`. `run_gb10.sh train` trains the point model on CrowdHuman; `jhu`
-fine-tunes it on CrowdHuman + JHU-Crowd++ (`weights/p2pnet_crowd_jhu.pth`). To
-adapt it to your own footage, label 30–50 frames (one `x y` head point per line) into `dataset/kumbh_points/{train,test}`;
-`run_gb10.sh` includes them.
+fine-tunes it on CrowdHuman + JHU-Crowd++ (`weights/p2pnet_crowd_jhu.pth`, the
+default). Both use public data only, so the default model is not tuned to any
+one site. To adapt it to your own footage, label 30–50 frames (one `x y` head
+point per line) into `dataset/<site>_points/{train,test}`, fine-tune with
+`train_dense.py` (see its docstring) and pass the result with `--dense-model`,
+e.g. `--dense-model weights/p2pnet_crowd_kumbh.pth`. Score it on held-out frames
+first: the Kumbh model overcounts even its own training frames by 10 %.
 
 ## 6. Layer map (report layers A–O)
 
