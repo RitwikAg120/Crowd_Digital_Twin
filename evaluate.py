@@ -16,6 +16,12 @@ Layer N — Quantitative evaluation of the Crowd Digital Twin.
       The 20 s forecast against what actually happened: people's positions
       and zone counts at 2.4–20 s, for persistence, constant velocity, the
       old twin and the new twin (with ablations).
+  python evaluate.py detect [--data points:dataset/kumbh_points]
+      Detection ablation: the dense-mode people counter with one part
+      switched off at a time, scored against labelled heads.
+
+Any mode takes --set KEY=VALUE to override a Config value (one component
+off), e.g. `mot17 --seq … --set STABILIZE=False`.
 
 Every run prints its metrics and saves them to results/eval_<mode>_<time>.json.
 """
@@ -341,6 +347,177 @@ def dense(args) -> dict:
                          "recall_of_count": float(np.sum([r[m] for r in sel]) / max(gt.sum(), 1))}
                      for m in methods}
     res["per_image"] = rows
+    return res
+
+
+# ─── Detection ablation ───────────────────────────────────────────────────────
+
+def match_heads(pred: np.ndarray, gt: np.ndarray) -> int:
+    """
+    Predicted head positions matched one-to-one to labelled heads (Hungarian),
+    a match counting only within that labelled head's size (dense.head_sizes,
+    from its neighbours' spacing). Returns the number of matches.
+    """
+    from dense import head_sizes
+    from scipy.spatial.distance import cdist
+    pred, gt = np.asarray(pred, float).reshape(-1, 2), np.asarray(gt, float).reshape(-1, 2)
+    if not len(pred) or not len(gt):
+        return 0
+    d = cdist(gt, pred)
+    cost = np.where(d <= head_sizes(gt)[:, None], d, 1e6)
+    r, c = linear_sum_assignment(cost)
+    return int((cost[r, c] < 1e6).sum())
+
+
+# The stock COCO weights, for the untuned-body variant. Not yolo26s.pt in the
+# repo root: that file is a copy of the fine-tuned model.
+COCO_BODY = "weights/yolo26s_coco.pt"
+
+# (variant, what it changes against the full dense-mode counter)
+DETECT_VARIANTS = (
+    ("full",               "bodies + head points (JHU point model), heads sized and merged, each body owns its head"),
+    ("no_body_detector",   "head points only"),
+    ("no_point_model",     "bodies + 2560 px head boxes"),
+    ("no_point_no_hires",  "bodies + 1280 px head boxes"),
+    ("no_dense_mode",      "normal mode: bodies only"),
+    ("heads_everywhere",   "normal mode with heads as people (1280 px, a head inside a body box is that body's)"),
+    ("no_ownership",       "every head point is a person, even one on a body"),
+    ("no_head_scale",      "head points sized by their spacing, not merged"),
+    ("no_enhance",         "no contrast equalisation before the point model"),
+    ("body_untuned",       f"COCO YOLO26s ({COCO_BODY}) instead of the fine-tuned body model"),
+    ("body_small",         "fine-tuned YOLO26n instead of YOLO26s"),
+    ("points_crowdhuman",  "point model trained on CrowdHuman only"),
+    ("points_kumbh",       "point model fine-tuned on these Kumbh frames (in-sample: reference only)"),
+)
+
+
+def detect(args) -> dict:
+    """
+    Detection ablation on labelled head points (`points` folders, as in
+    train_dense.py): the dense-mode people counter with one part changed at a
+    time (DETECT_VARIANTS). Each variant's people are scored at their heads —
+    a body box's head is its top centre — for count error and for how many
+    labelled heads they find (precision / recall / F1, matched within a head's
+    size). The head-size model (dense.HeadScale) learns from all of a
+    source's frames, as it would while the camera runs.
+    """
+    from dense import HeadScale, PointCounter
+    from train_dense import list_samples
+    from ultralytics import YOLO
+    samples = []
+    for spec in args.data:
+        kind, root = spec.split(":", 1)
+        samples += list_samples(kind, root, args.split)
+    if not samples:
+        raise SystemExit("No labelled images found.")
+    pipe = CDTPipeline(record_experience=False)
+    body_models = {"ft": pipe.fbox_model, "small": YOLO("weights/yolo26ntrained.pt")}
+    variants = DETECT_VARIANTS
+    if Path(COCO_BODY).exists():
+        body_models["base"] = YOLO(COCO_BODY)
+    else:
+        print(f"  {COCO_BODY} not found: skipping body_untuned")
+        variants = tuple(v for v in variants if v[0] != "body_untuned")
+    point_models = {key: PointCounter(w, pipe.device, Config.DENSE_THRESHOLD, half=pipe.half, enhance=enh)
+                    for key, w, enh in (("jhu", "weights/p2pnet_crowd_jhu.pth", True),
+                                        ("jhu_plain", "weights/p2pnet_crowd_jhu.pth", False),
+                                        ("crowdhuman", "weights/p2pnet_crowd.pth", True),
+                                        ("kumbh", "weights/p2pnet_crowd_kumbh.pth", True))}
+
+    # Raw model outputs, once per image
+    raw = []
+    for i, (path, gt, _) in enumerate(samples):
+        img = cv2.imread(str(path))
+        h, w = fit_within(*img.shape[:2], Config.FRAME_HEIGHT, Config.FRAME_WIDTH)
+        if img.shape[:2] != (h, w):
+            s = w / img.shape[1]
+            img, gt = cv2.resize(img, (w, h)), gt * s
+        r = {"source": Path(path).stem.rsplit("_", 1)[0], "image": Path(path).name, "gt": gt,
+             "heads": pipe.detect(pipe.hbox_model, img, Config.HBOX_CONF, Config.HBOX_IMGSZ),
+             "heads_hi": pipe.detect(pipe.hbox_model, img, Config.HBOX_CONF_DENSE,
+                                     Config.HBOX_IMGSZ_DENSE)}
+        for k, m in body_models.items():
+            r[f"body_{k}"] = np.array([d["box"] for d in pipe.detect(m, img, Config.YOLO_CONF,
+                                                                     Config.YOLO_IMGSZ)],
+                                      np.float32).reshape(-1, 4)
+        for k, m in point_models.items():
+            r[f"points_{k}"] = m(img)
+        raw.append(r)
+        print(f"  {i + 1}/{len(samples)} {r['image']}: {len(gt)} heads labelled, "
+              f"{len(r['body_ft'])} bodies, {len(r['heads_hi'])} heads, "
+              f"{len(r['points_jhu'][0])} points")
+
+    scales = {}
+    for r in raw:                                      # one head-size model per camera
+        scales.setdefault(r["source"], HeadScale()).add(r["heads_hi"])
+
+    def heads_of(bodies):
+        b = np.asarray(bodies, float).reshape(-1, 4)
+        return np.column_stack([(b[:, 0] + b[:, 2]) / 2, b[:, 1] + 0.08 * (b[:, 3] - b[:, 1])])
+
+    def people(r, v):
+        """Head positions of everyone the variant counts in image r."""
+        bodies = r[{"body_untuned": "body_base", "body_small": "body_small"}.get(v, "body_ft")]
+        pts = r["points_" + {"no_enhance": "jhu_plain", "points_crowdhuman": "crowdhuman",
+                             "points_kumbh": "kumbh"}.get(v, "jhu")]
+        if v == "no_dense_mode":
+            return heads_of(bodies)
+        if v == "no_body_detector":
+            bodies = np.zeros((0, 4), np.float32)
+        if v == "no_ownership":
+            return np.vstack([heads_of(bodies), pts[0]])
+        old = Config.HEADS_AS_PEOPLE
+        try:
+            if v == "heads_everywhere":
+                Config.HEADS_AS_PEOPLE = True
+                extra, _, _ = pipe._unmatched_heads(bodies, r["heads"], None, None, crowd=False)
+            elif v in ("no_point_model", "no_point_no_hires"):
+                hd = r["heads_hi" if v == "no_point_model" else "heads"]
+                extra, _, _ = pipe._unmatched_heads(bodies, hd, None, None, crowd=True)
+            else:
+                scale = None if v == "no_head_scale" else scales[r["source"]]
+                extra, _, _ = pipe._unmatched_heads(bodies, r["heads_hi"], pts, scale, crowd=True)
+        finally:
+            Config.HEADS_AS_PEOPLE = old
+        return np.vstack([heads_of(bodies), (extra[:, :2] + extra[:, 2:]) / 2])
+
+    per_image = []
+    for r in raw:
+        hb = np.array([h["box"] for h in r["heads_hi"]], np.float32).reshape(-1, 4)
+        n_x = int((~pipe._heads_of_bodies((hb[:, :2] + hb[:, 2:]) / 2, r["body_ft"])).sum())
+        n_x = max(n_x, int((~pipe._heads_of_bodies(r["points_jhu"][0], r["body_ft"])).sum()))
+        row = {"source": r["source"], "image": r["image"], "gt": len(r["gt"]),
+               "dense_mode_switches_on": bool(n_x >= Config.DENSE_MIN_HEADS and
+                                              n_x >= Config.DENSE_HEAD_RATIO * len(r["body_ft"]))}
+        for v, _ in variants:
+            p = people(r, v)
+            row[v] = {"count": len(p), "matched": match_heads(p, r["gt"])}
+        per_image.append(row)
+
+    def score(rows, v):
+        gt = np.array([x["gt"] for x in rows], float)
+        n = np.array([x[v]["count"] for x in rows], float)
+        tp = float(sum(x[v]["matched"] for x in rows))
+        prec, rec = tp / max(n.sum(), 1), tp / max(gt.sum(), 1)
+        return {"count_mae": float(np.mean(np.abs(n - gt))), "count_bias": float(np.mean(n - gt)),
+                "counted_share": float(n.sum() / max(gt.sum(), 1)),
+                "precision": prec, "recall": rec,
+                "f1": 2 * prec * rec / max(prec + rec, 1e-9)}
+
+    groups = {"all": per_image,
+              "ground": [x for x in per_image if "drone" not in x["source"]],
+              "drone": [x for x in per_image if "drone" in x["source"]]}
+    res = {"images": len(per_image), "device": pipe.device, "labelled_heads": int(sum(x["gt"] for x in per_image)),
+           "variants": dict(variants),
+           "head_scale_fitted": {s: hs.predict(np.array([0.0])) is not None for s, hs in scales.items()},
+           "groups": {g: {"images": len(rows), "labelled_heads": int(sum(x["gt"] for x in rows)),
+                          **{v: score(rows, v) for v, _ in variants}}
+                      for g, rows in groups.items() if rows},
+           "per_image": per_image}
+    print(f"\n{'variant':<20}" + "".join(f"{g + ' MAE / F1':>22}" for g in res["groups"]))
+    for v, _ in variants:
+        print(f"{v:<20}" + "".join(f"{res['groups'][g][v]['count_mae']:>12.1f} / {res['groups'][g][v]['f1']:.2f}"
+                                   for g in res["groups"]))
     return res
 
 
@@ -695,17 +872,40 @@ def main():
     f.add_argument("--warmup", type=float, default=3.0, help="seconds of history before the first")
     f.add_argument("--horizons", type=float, nargs="+", default=[2.4, 4.8, 8.0, 12.0, 16.0, 20.0])
 
-    for p in (b, t, m, d):
+    a = sub.add_parser("detect", help="detection ablation on labelled head points")
+    a.add_argument("--data", action="append", default=None,
+                   help="kind:path as in train_dense.py (default: points:dataset/kumbh_points)")
+    a.add_argument("--split", default="train", choices=("train", "test"))
+
+    for p in (b, t, m, d, a):
         p.add_argument("--device", default=Config.DEVICE, help="auto | cpu | cuda:0")
+    for p in (b, t, m, d, a, f):
+        p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                       help="override a Config value for this run, e.g. --set YOLO_IMGSZ=640 "
+                            "(how `run_gb10.sh ablate` switches components off)")
 
     args = parser.parse_args()
     if getattr(args, "device", None):
         Config.DEVICE = args.device
+    if args.mode == "detect" and not args.data:
+        args.data = ["points:dataset/kumbh_points"]
+    overrides = {}
+    for kv in args.set:
+        import ast
+        key, _, val = kv.partition("=")
+        if not hasattr(Config, key):
+            raise SystemExit(f"--set: Config has no {key}")
+        try:
+            overrides[key] = ast.literal_eval(val)
+        except (ValueError, SyntaxError):
+            overrides[key] = val                         # a plain string, e.g. a weights path
+        setattr(Config, key, overrides[key])
 
     result = {"bench": bench, "tracks": tracks, "mot17": mot17,
-              "forecast": forecast, "dense": dense}[args.mode](args)
+              "forecast": forecast, "dense": dense, "detect": detect}[args.mode](args)
     result = _clean({"mode": args.mode,
                      "timestamp": datetime.now().isoformat(timespec="seconds"),
+                     **({"config_overrides": overrides} if overrides else {}),
                      **result})
 
     out_dir = Path("results")

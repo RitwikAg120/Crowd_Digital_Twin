@@ -7,7 +7,7 @@
 #
 #   bash scripts/gb10_setup.sh                      # once
 #   python scripts/fetch_datasets.py all            # MOT17 sequences + CrowdHuman check
-#   bash scripts/run_gb10.sh [measure|mot17|train|jhu|all]    # default: all
+#   bash scripts/run_gb10.sh [measure|mot17|train|jhu|ablate|all]    # default: all
 #
 # Needs, besides the code: weights/yolo26strained.pt and weights/yoloheadv26s.pt
 # (not in git — copy them from the laptop), dataset/MOT17 and dataset/CrowdHuman,
@@ -122,5 +122,35 @@ if [ "$WHAT" = jhu ] || [ "$WHAT" = all ]; then
   else
     echo "--- skip JHU fine-tune: needs dataset/JHU-Crowd, dataset/CrowdHuman and weights/p2pnet_crowd.pth"
   fi
+fi
+if [ "$WHAT" = ablate ] || [ "$WHAT" = all ]; then
+  # 7. Detection and tracking ablations: one component off at a time on the
+  #    held-out MOT17 frames (MOTA, count error), then the dense-mode counter's
+  #    ablation on labelled heads (Kumbh frames; JHU val when present)
+  ABL=("full:"
+       "body_untuned:YOLO_MODEL=weights/yolo26s_coco.pt"
+       "body_small:YOLO_MODEL=weights/yolo26ntrained.pt"
+       "body_640px:YOLO_IMGSZ=640"
+       "heads_everywhere:HEADS_AS_PEOPLE=True"
+       "no_heads:HEADS_AS_PEOPLE=False"
+       "no_dense_switch:DENSE_AUTO=False"
+       "no_track_buffer:TRACKER_BUFFER=1"
+       "no_stabilize:STABILIZE=False")
+  for s in $MOT17_SEQS; do
+    for a in "${ABL[@]}"; do
+      name=${a%%:*}; kv=${a#*:}
+      # The stock COCO weights (yolo26s.pt in the repo root is the fine-tuned
+      # model, and a missing file would silently fall back to it)
+      if [[ "$kv" == YOLO_MODEL=* ]] && [ ! -f "${kv#YOLO_MODEL=}" ]; then
+        echo "--- skip ablate $s $name: ${kv#YOLO_MODEL=} not found"; continue
+      fi
+      SET=(); [ -n "$kv" ] && SET=(--set "$kv")
+      weights "ablate $s $name" && run "ablate_${s}_$name" python evaluate.py mot17 \
+          --seq "dataset/MOT17/train/$s" --start-frac 0.85 "${SET[@]}" "${DEV[@]}"
+    done
+  done
+  [ "$KUMBH_POINTS_OK" = 1 ] && weights "ablate detect" && run ablate_detect_kumbh python evaluate.py detect "${DEV[@]}"
+  [ "${JHU_OK:-0}" = 1 ] && weights "ablate detect jhu" && \
+    run ablate_detect_jhu python evaluate.py detect --data jhu:dataset/JHU-Crowd --split test "${DEV[@]}"
 fi
 echo "Done. JSON results: results/eval_*.json · logs: $LOG/"
