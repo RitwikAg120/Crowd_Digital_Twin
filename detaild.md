@@ -158,6 +158,7 @@ forecast physics are in `forecast.ForecastParams`. The main ones:
 | Dense | `DENSE_MIN_HEADS` / `DENSE_HEAD_RATIO` | `40` / `2.0` | Switch on at ≥40 head-only people and ≥2× the bodies |
 | Dense | `HBOX_IMGSZ_DENSE` / `HBOX_CONF_DENSE` | `2560` / `0.15` | Head detector in dense mode (3–10 px heads) |
 | Dense | `DENSE_MODEL` | `p2pnet_crowd_jhu.pth`, else `_crowd.pth` | Point model, used if present |
+| Dense | `DENSE_MODEL_LOWRES` / `LOWRES_MAX_SIDE` | `p2pnet_crowd_kumbh.pth` / `960` | Point model for low-resolution sources only |
 | Dense | `DENSE_THRESHOLD` / `DENSE_ENHANCE` | `0.5` / `True` | Head-point score; contrast-equalise first (fog/dusk) |
 | Dense | `HEAD_TRACK_SCALE` | `3.0` | Head-only people tracked as a box this many head sizes wide |
 | Pipeline | `FRAME_SKIP` | `2` | Process every Nth source frame |
@@ -292,9 +293,11 @@ FPN decoder, and regression/classification heads predicting one offset + score p
 anchor. `weights/p2pnet_crowd_jhu.pth` (CrowdHuman + JHU-Crowd++) is preferred when
 present over `weights/p2pnet_crowd.pth` (CrowdHuman only); on JHU-Crowd++
 validation the JHU model counts 82 % of people (MAE 78) vs 43 % (MAE 175) for the
-CrowdHuman-only one. Inference is FP16 on CUDA, else CPU. The default stays
-site-neutral (public data only); a model fine-tuned on one site's frames, such
-as `p2pnet_crowd_kumbh.pth`, is used only when passed with `--dense-model`.
+CrowdHuman-only one. Inference is FP16 on CUDA, else CPU. Both are trained on
+public data only, so the model is the same for every site. The one exception is
+low-resolution video (long side ≤ `LOWRES_MAX_SIDE` = 960 px, heads 2–5 px):
+there `DENSE_MODEL_LOWRES` (`p2pnet_crowd_kumbh.pth`, the JHU model fine-tuned on
+12 such frames) is used when present. `--dense-model` sets one model for all.
 
 ---
 

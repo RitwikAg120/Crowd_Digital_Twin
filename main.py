@@ -98,13 +98,18 @@ class Config:
     HBOX_IMGSZ_DENSE  = 2560       # head detector input in dense mode (3–10 px heads)
     HBOX_CONF_DENSE   = 0.15
     # Head-point model (dense.py), used if present: the JHU one (CrowdHuman +
-    # JHU-Crowd++, public data only), else CrowdHuman-only. The default stays
-    # site-neutral; a model fine-tuned on one site's frames (e.g.
-    # p2pnet_crowd_kumbh.pth) is opt-in with --dense-model. That Kumbh model
-    # overcounts its own training frames by 10 % (evaluate.py detect).
+    # JHU-Crowd++, public data only), else CrowdHuman-only. Site-neutral, for
+    # every source except the narrow case below.
     DENSE_MODEL       = next((w for w in ("weights/p2pnet_crowd_jhu.pth",
                                           "weights/p2pnet_crowd.pth") if Path(w).exists()),
                              "weights/p2pnet_crowd.pth")
+    # Low-resolution sources only (long side ≤ LOWRES_MAX_SIDE, e.g. 768×432
+    # festival clips, where heads are 2–5 px): the same model fine-tuned on
+    # such frames, if present. It runs only where any point model runs — in
+    # dense mode and its probes. None = DENSE_MODEL everywhere; --dense-model
+    # sets one model for every source.
+    DENSE_MODEL_LOWRES = "weights/p2pnet_crowd_kumbh.pth"
+    LOWRES_MAX_SIDE   = 960
     DENSE_THRESHOLD   = 0.5        # head score for a point
     DENSE_ENHANCE     = True       # equalise contrast before the point model (fog, dusk)
     DENSE_EVERY       = 1          # run the point model every Nth processed frame in dense mode
@@ -2386,7 +2391,8 @@ class CDTPipeline(TwinPipeline):
         if share is not None:                    # another camera: same models, one at a time
             self._infer_lock = share._infer_lock
             self.fbox_model, self.hbox_model = share.fbox_model, share.hbox_model
-            self.points_model, self.model_name = share.points_model, share.model_name
+            self._point_models, self.model_name = share._point_models, share.model_name
+            self.points_model = self._point_models.get("default")
             self._finish_init(record_experience)
             return
         self._infer_lock = threading.Lock()
@@ -2419,16 +2425,21 @@ class CDTPipeline(TwinPipeline):
         print(f"[CDT] HBOX model: {hbox_path}")
 
         # ── Dense-crowd head points (dense.py), if weights are in place ──
-        self.points_model = None
-        if Config.DENSE_MODEL and Path(Config.DENSE_MODEL).exists():
+        # "default" for every source; "lowres" for low-resolution ones (configure)
+        self._point_models = {}
+        for key, w in (("default", Config.DENSE_MODEL), ("lowres", Config.DENSE_MODEL_LOWRES)):
+            if not w or not Path(w).exists():
+                continue
             from dense import PointCounter
             try:
-                self.points_model = PointCounter(Config.DENSE_MODEL, self.device,
-                                                 Config.DENSE_THRESHOLD, half=self.half,
-                                                 enhance=Config.DENSE_ENHANCE)
-                print(f"[CDT] Dense-crowd point model: {Config.DENSE_MODEL}")
+                self._point_models[key] = PointCounter(w, self.device, Config.DENSE_THRESHOLD,
+                                                       half=self.half, enhance=Config.DENSE_ENHANCE)
+                print(f"[CDT] Dense-crowd point model ({key}): {w}")
             except Exception as e:
-                print(f"[CDT] Dense-crowd point model not loaded ({e}); using head boxes only.")
+                print(f"[CDT] Dense-crowd point model {w} not loaded ({e}).")
+        self.points_model = self._point_models.get("default")
+        if self.points_model is None:
+            print("[CDT] No dense-crowd point model: dense mode uses head boxes only.")
         print(f"[CDT] Device: {self.device}{' (FP16)' if self.half else ''}")
         self._finish_init(record_experience)
 
@@ -2484,12 +2495,21 @@ class CDTPipeline(TwinPipeline):
 
     def configure(self, h: int, w: int, source_fps: float):
         super().configure(h, w, source_fps)
+        key = self.point_model_for(self._point_models, h, w)
+        if self._point_models.get(key) is not self.points_model:
+            print(f"[CDT] {w}x{h} source: {key} point model")
+        self.points_model = self._point_models.get(key)
         self.tracker = self._sv.ByteTrack(
             track_activation_threshold=Config.YOLO_CONF,
             lost_track_buffer=Config.TRACKER_BUFFER,
             minimum_matching_threshold=0.8,
             frame_rate=25,
         )
+
+    @staticmethod
+    def point_model_for(models: dict, h: int, w: int) -> str:
+        """Which point model an h × w source uses: "lowres" only for low-resolution sources."""
+        return "lowres" if max(h, w) <= Config.LOWRES_MAX_SIDE and "lowres" in models else "default"
 
     def start(self):
         self.video.start()
@@ -3333,7 +3353,9 @@ if __name__ == "__main__":
                                                           f".pt, .engine or .onnx)")
     parser.add_argument("--head", metavar="WEIGHTS", help=f"head detector (default {Config.HBOX_MODEL})")
     parser.add_argument("--dense-model", metavar="WEIGHTS",
-                        help=f"dense-crowd point model (default {Config.DENSE_MODEL}, if present)")
+                        help=f"dense-crowd point model for every source (default {Config.DENSE_MODEL}, "
+                             f"and {Config.DENSE_MODEL_LOWRES} for sources ≤ {Config.LOWRES_MAX_SIDE} px, "
+                             f"if present)")
     parser.add_argument("--iot", action="store_true",
                         help="enable IoT gate counters (simulated until real counts arrive "
                              "on POST /api/iot or MQTT); off = video-only fusion")
@@ -3352,7 +3374,8 @@ if __name__ == "__main__":
     Config.IOT_ENABLED      = bool(args.iot or args.mqtt) or Config.IOT_ENABLED
     Config.YOLO_MODEL       = args.body or Config.YOLO_MODEL
     Config.HBOX_MODEL       = args.head or Config.HBOX_MODEL
-    Config.DENSE_MODEL      = args.dense_model or Config.DENSE_MODEL
+    if args.dense_model:                     # one model for every source
+        Config.DENSE_MODEL, Config.DENSE_MODEL_LOWRES = args.dense_model, None
 
     if args.replay:
         size = None

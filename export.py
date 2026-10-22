@@ -59,9 +59,10 @@ def main():
     export_yolo(Config.YOLO_MODEL, args.format, Config.YOLO_IMGSZ, half, args.int8, args.data, False)
     print("Head detector (dynamic sizes up to the dense-mode input)")
     export_yolo(Config.HBOX_MODEL, args.format, Config.HBOX_IMGSZ_DENSE, half, args.int8, args.data, True)
-    if Config.DENSE_MODEL and Path(Config.DENSE_MODEL).exists():
-        print("Dense-crowd point model")
-        export_points(Config.DENSE_MODEL, Path(Config.DENSE_MODEL).with_suffix(".onnx"))
+    for label, w in (("", Config.DENSE_MODEL), (" (low-resolution sources)", Config.DENSE_MODEL_LOWRES)):
+        if w and Path(w).exists():
+            print(f"Dense-crowd point model{label}")
+            export_points(w, Path(w).with_suffix(".onnx"))
 
 
 if __name__ == "__main__":

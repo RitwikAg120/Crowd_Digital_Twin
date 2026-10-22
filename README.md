@@ -126,7 +126,10 @@ went from 3–23 tracked people per frame (bodies only) to several hundred with 
 point model. The model is `weights/p2pnet_crowd_jhu.pth` if present (CrowdHuman +
 JHU-Crowd++, the better one for dense/foggy/high-view crowds), else
 `weights/p2pnet_crowd.pth` (CrowdHuman only); train either on the GB10
-(`train_dense.py`, §5). The dashboard shows **Dense mode** and how people were
+(`train_dense.py`, §5). One narrow exception: for low-resolution sources (long
+side ≤ `LOWRES_MAX_SIDE` = 960 px, where heads are 2–5 px) a copy fine-tuned on
+such frames, `weights/p2pnet_crowd_kumbh.pth`, is used instead when present
+(`DENSE_MODEL_LOWRES`; `--dense-model` sets one model for every source). The dashboard shows **Dense mode** and how people were
 **found** (body / head / point).
 
 Inference runs on CUDA in FP16 when PyTorch sees a GPU, otherwise on CPU.
@@ -294,11 +297,12 @@ licences accepted, so `fetch_datasets.py` only checks they are unpacked under
 `dataset/`. `run_gb10.sh train` trains the point model on CrowdHuman; `jhu`
 fine-tunes it on CrowdHuman + JHU-Crowd++ (`weights/p2pnet_crowd_jhu.pth`, the
 default). Both use public data only, so the default model is not tuned to any
-one site. To adapt it to your own footage, label 30–50 frames (one `x y` head
-point per line) into `dataset/<site>_points/{train,test}`, fine-tune with
-`train_dense.py` (see its docstring) and pass the result with `--dense-model`,
-e.g. `--dense-model weights/p2pnet_crowd_kumbh.pth`. Score it on held-out frames
-first: the Kumbh model overcounts even its own training frames by 10 %.
+one site. The only fine-tuned variant is the low-resolution one
+(`p2pnet_crowd_kumbh.pth`, 12 labelled 768×432 frames, see §3); to make one for
+other footage, label 30–50 frames (one `x y` head point per line) into
+`dataset/<site>_points/{train,test}`, fine-tune with `train_dense.py` (see its
+docstring) and pass the result with `--dense-model`. Score it on held-out
+frames first: the Kumbh variant overcounts even its own training frames by 10 %.
 
 ## 6. Layer map (report layers A–O)
 

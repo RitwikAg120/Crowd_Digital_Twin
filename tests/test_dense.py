@@ -72,6 +72,15 @@ def _fake_pipeline():
                            _merge_points=CDTPipeline._merge_points)
 
 
+def test_lowres_point_model_only_for_lowres_sources():
+    pick = CDTPipeline.point_model_for
+    both = {"default": object(), "lowres": object()}
+    assert pick(both, 432, 768) == "lowres"                  # festival clip
+    assert pick(both, 720, 1280) == "default"                # HD, also a downscaled 4K source
+    assert pick(both, 1080, 1920) == "default"
+    assert pick({"default": object()}, 432, 768) == "default"  # no low-res weights
+
+
 def test_heads_without_bodies_become_people():
     fake = _fake_pipeline()
     bodies = np.array([[100, 100, 140, 220]], np.float32)

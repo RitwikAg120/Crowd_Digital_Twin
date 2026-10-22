@@ -387,7 +387,9 @@ DETECT_VARIANTS = (
     ("body_untuned",       f"COCO YOLO26s ({COCO_BODY}) instead of the fine-tuned body model"),
     ("body_small",         "fine-tuned YOLO26n instead of YOLO26s"),
     ("points_crowdhuman",  "point model trained on CrowdHuman only"),
-    ("points_kumbh",       "point model fine-tuned on these Kumbh frames (in-sample: reference only)"),
+    # the live pipeline's model for low-resolution sources like these frames,
+    # but trained on them, so the site-neutral JHU model is the one scored as "full"
+    ("points_kumbh",       "low-resolution point model, fine-tuned on these Kumbh frames (in-sample: reference only)"),
 )
 
 
