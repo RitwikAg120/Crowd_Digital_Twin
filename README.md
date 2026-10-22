@@ -113,7 +113,7 @@ the body detector missed: each becomes a whole-person box (head on top, feet
 from the ground geometry — exact with a camera calibration, 7 head-heights
 otherwise) and is tracked with the bodies.
 
-**Dense mode.** In a dense crowd (a ghat at the Kumbh) bodies are hidden and
+**Dense mode.** In a dense crowd (a festival ghat, a stadium concourse, a station platform at rush hour) bodies are hidden and
 heads are 3–10 px, so both detectors miss most people. When many heads have
 no body (at least `DENSE_MIN_HEADS` = 40 of them, and ≥ `DENSE_HEAD_RATIO` = 2×
 the bodies), the pipeline switches to dense mode by itself: the head detector

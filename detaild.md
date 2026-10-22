@@ -271,7 +271,7 @@ geometry (exact with a camera model; `BODY_PER_HEAD` = 7 head-heights otherwise)
 head (`_heads_of_bodies`), and duplicate points on one head are merged, so nobody
 is double-counted.
 
-**Dense mode.** In a dense crowd (a Kumbh ghat) bodies are hidden and heads are
+**Dense mode.** In a dense crowd (a festival ghat, a stadium concourse, a station platform at rush hour) bodies are hidden and heads are
 3–10 px, so the box detectors miss most people. When at least `DENSE_MIN_HEADS`
 (40) heads have no body **and** they are ≥ `DENSE_HEAD_RATIO` (2×) the bodies, the
 pipeline switches to dense mode by itself (and off again below half of each).
