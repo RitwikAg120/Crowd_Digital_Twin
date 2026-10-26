@@ -10,7 +10,7 @@ experience/logs/
 experience/frames/
 
 # Large datasets / media
-videos/
+videos/vid1.mp4          # duplicate of videos/demo.mp4
 dataset/
 
 # Model weights
