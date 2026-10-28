@@ -396,6 +396,7 @@ running instance; the asyncio loop is cached at startup for cross-thread broadca
 |----------|--------|-------------|
 | `/ws` | WS | Full dashboard payload at up to 10 Hz |
 | `/ws/twin` | WS | 3D twin: scene + crowd state + forecast |
+| `/ws/grid` | WS | Multi-feed grid: a tile (numbers + small annotated image) per camera at `GRID_HZ`; images are made only while a grid is connected |
 | `/api/snapshot` | GET | Last payload (image stripped) |
 | `/api/zones` | GET | Zone geometry + area in m² |
 | `/api/fusion_log` | GET | Last 20 fusion results |
@@ -403,6 +404,10 @@ running instance; the asyncio loop is cached at startup for cross-thread broadca
 | `/api/twin/whatif?panic=0.8` | GET | Escape-panic what-if |
 | `/api/sources` | GET | Videos the dashboard can switch to |
 | `/api/source` | POST | Switch source `{"name"}` or `{"url"}` |
+| `/api/cameras` | GET / POST | Every camera, with live numbers / add one `{"name"}` or `{"url"}` (live runs only, up to `MAX_CAMERAS`) |
+| `/api/cameras/{id}` | DELETE | Stop a camera (not the last; the next one takes the main view if it was on it) |
+| `/api/camera` | POST | Put camera `{"id"}` on the main view |
+| `/api/site` | GET | All cameras' people on one map; overlaps counted once with `--site` |
 | `/api/iot` | POST | Real gate counts `{"entry","exit"}` (optional `X-IoT-Token`) |
 | `/api/health` | GET | Video arriving?, uptime, FPS, stream reconnects |
 | `/` , `/twin` | GET | The dashboard and the 3D twin pages |
@@ -519,5 +524,5 @@ full pipeline runs at ~2–3 FPS; twin-only replay handles ~200 people at ~11 ms
 
 ---
 
-*This document reflects the current code on branch `DTv2`. See `README.md` for the
+*This document reflects the current code on branch `DTv4`. See `README.md` for the
 quick start and the capstone report (`reference/`) for the academic rationale.*

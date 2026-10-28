@@ -17,7 +17,7 @@ zone risk scoring and a live WebSocket dashboard.
 | `evaluate.py`              | Layer N — benchmarks and accuracy metrics; results go to `results/`      |
 | `train_dense.py`           | Trains the dense-crowd point model (run on the GB10)                     |
 | `export.py`                | TensorRT / ONNX export for Jetson or the GB10 (run on the target)        |
-| `scripts/`                 | GB10: `gb10_setup.sh`, `fetch_datasets.py`, `run_gb10.sh` (every measurement and training run) |
+| `scripts/`                 | GB10: `gb10_setup.sh`, `fetch_datasets.py`, `run_gb10.sh` (every measurement and training run); `pets_to_mp4.py` (multi-camera demo videos), `bigger_fonts.py` (dashboard text size), `push.bat` (commit + push) |
 | `tests/`                   | Checks: `python tests/test_forecast.py` (twin-only env), `test_dense.py`, `test_api.py` (full env) |
 | `calibrate.py`             | Ground calibration: click ≥4 floor points, or give the camera's height/tilt |
 | `calibration/`             | Calibration files; `auto_<video>.json` are the saved automatic estimates |
@@ -90,6 +90,7 @@ python main.py --source videos/a.mp4 --source rtsp://<ip>/2   # several cameras 
 python main.py --source a.mp4 --source b.mp4 --site site.json  # … placed on one site map (see §4)
 python main.py --iot                               # turn on the (optional) IoT gate counters
 python main.py --device cpu                        # default: auto (CUDA when available)
+python main.py --realtime                          # files: drop frames like a live camera (default: never skip; a slow CPU slows playback instead)
 ```
 
 REST endpoints:
@@ -102,8 +103,27 @@ curl -X POST -H "Content-Type: application/json" -d '{"name":"demo.mp4"}' http:/
 curl http://localhost:8000/api/twin       # 3D twin: scene (floor, walls, zones, camera), crowd state, 20 s forecast
 curl http://localhost:8000/api/cameras    # every camera, and which one is on screen
 curl -X POST -H "Content-Type: application/json" -d '{"id":"cam2"}' http://localhost:8000/api/camera
+curl -X POST -H "Content-Type: application/json" -d '{"name":"b.mp4"}' http://localhost:8000/api/cameras   # add a camera while running ({"url":"rtsp://…"} for a stream)
+curl -X DELETE http://localhost:8000/api/cameras/cam2                                                     # stop one
 curl http://localhost:8000/api/site       # everyone all cameras see, overlaps counted once
 ```
+
+**Multi-camera demo (one event, several angles).** Use cameras that film the
+same place at the same time — e.g. PETS 2009 S2.L1 (7 synchronised views of a
+campus crossing; a copy is on Kaggle as `yeeandres/pets2009`). Extract it to
+`pets/`, then:
+```bash
+python scripts/pets_to_mp4.py pets/Crowd_PETS09/S2/L1/Time_12-34 videos/pets 7
+python main.py --source videos/pets/pets_View_001.mp4 --source videos/pets/pets_View_005.mp4
+```
+`pets/` and `videos/pets/` are git-ignored (rebuild them with the script). On a
+laptop CPU use two cameras: each runs its own body + head detectors.
+
+**Dashboard text size:** `python scripts/bigger_fonts.py` (1.3×; `1.5` or `undo`).
+
+**Pushing (Windows):** `scripts\push.bat "what changed"` commits everything not
+in `.gitignore` and pushes the current branch. Weights, venvs, datasets, logs,
+results, exported engines and backups are ignored, so they never go up.
 
 ## 3. Models
 
@@ -189,7 +209,12 @@ CrowdHuman) and copy the resulting `best.pt` into `weights/`.
   is not mistaken for an obstacle.
 - **Several cameras.** Repeat `--source` for each camera: each gets its own
   calibration, twin and forecast (they share one copy of the models). The
-  dashboard switches between them and shows the site total. A site file
+  dashboard's **Grid view** shows every camera at once — a live annotated
+  tile each with its count, risk, trend, latency and per-zone counts; click a
+  tile to open that camera in the main view (the panels on the sides follow
+  the camera on the main view). Cameras can be added (a video from `videos/`,
+  an `rtsp://` URL or a camera number) and removed from the dashboard while
+  it runs, up to `MAX_CAMERAS` (8); the site total is across all of them. A site file
   (`--site site.json`) places the cameras on one map —
   `{"merge_radius_m": 0.6, "cameras": {"cam1": {"x": 0, "y": 0, "yaw_deg": 0},
   "cam2": {"x": 12, "y": 30, "yaw_deg": 180}}}` (x, y: the point under the

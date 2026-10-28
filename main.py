@@ -126,6 +126,9 @@ class Config:
     FRAME_WIDTH       = 1280       # max working resolution; larger sources are downscaled
     FRAME_HEIGHT      = 720
     SOURCE_FPS        = 25.0       # used when the source does not report its frame rate
+    FILE_REALTIME     = False      # files: False = never skip frames (playback slows to the
+                                   # pipeline's speed, as evaluate.py does); True = drop
+                                   # frames like a live camera when the pipeline falls behind
     STREAM_RETRY_READS = 200       # failed reads (~2 s) before a live stream is reopened
     STABILIZE         = True       # compensate camera motion (turns itself on only when the view moves)
 
@@ -211,6 +214,9 @@ class Config:
     SEND_FRAME        = True       # False → heatmap without any video pixels in the payload
     OVERLAY_DETAIL    = "clean"    # dashboard video: "clean" (zones, boxes, feet) or "full" (+ ids, heads)
     WS_HZ             = 10         # max broadcasts per second
+    GRID_HZ           = 4          # multi-feed grid: updates per second, per camera
+    GRID_THUMB_W      = 480        # multi-feed grid: tile image width in px
+    MAX_CAMERAS       = 8          # cameras that may run at once (each one is a pipeline + twin)
     EXPERIENCE_MAX_GB = 2.0        # oldest experience logs/frames are deleted beyond this
 
     # Videos the dashboard's source switcher offers
@@ -1497,6 +1503,7 @@ class VideoInputHandler:
         self.fps      = Config.SOURCE_FPS
         self._frame:  Optional[np.ndarray] = None
         self._seq     = 0              # number of the newest frame
+        self._taken   = 0              # number of the last frame the pipeline took
         self._ts      = 0.0            # capture time of the newest frame
         self._lock    = threading.Lock()
         self._running = False
@@ -1559,6 +1566,12 @@ class VideoInputHandler:
                         time.sleep(0.01)
                 continue
             fails = 0
+            if self._is_file and not Config.FILE_REALTIME:
+                # Hold the file until the pipeline has taken the frame it needs, so
+                # nothing is skipped on slow hardware (tracking stays frame to frame)
+                while self._running and self._seq - self._taken >= Config.FRAME_SKIP:
+                    time.sleep(0.002)
+                    next_t = time.perf_counter()
             if self._is_file:
                 # Pace playback to the file's frame rate
                 next_t += period
@@ -1577,7 +1590,13 @@ class VideoInputHandler:
         with self._lock:
             if self._frame is None:
                 return None
-            return self._frame.copy(), self._seq, self._ts
+            # A held file frame is "captured" when the pipeline gets it (playback waited)
+            ts = time.time() if self._is_file and not Config.FILE_REALTIME else self._ts
+            return self._frame.copy(), self._seq, ts
+
+    def taken(self, seq: int):
+        """The pipeline is processing frame `seq`: a file may move on to the next one."""
+        self._taken = seq
 
     @property
     def resolution(self) -> Tuple[int, int]:
@@ -1802,8 +1821,10 @@ class TwinPipeline:
         self._last_broadcast = 0.0
         self._running        = False
         self.latest_payload: Optional[dict] = None
-        self.on_air = True                       # multi-camera: only the selected one broadcasts
+        self.on_air = True                       # multi-camera: only the selected one feeds the main view
         self.camera_id = "cam1"
+        self._last_grid = 0.0                    # multi-feed grid: every camera feeds it
+        self._thumb_b64: Optional[str] = None
         # Latest crowd state in metres, read by the 3D twin (TwinService)
         self.twin_snapshot: Optional[dict] = None
         self._scene_cache: Optional[dict] = None
@@ -1915,17 +1936,39 @@ class TwinPipeline:
         except OSError as e:
             print(f"[Calibration] From people's heights: {why}. (Not saved: {e})")
 
+    def grid_tile(self, payload: Optional[dict] = None) -> Optional[dict]:
+        """
+        This camera's numbers and a small image, for a tile of the multi-feed
+        grid (every camera sends one, not just the one on the main view).
+        """
+        d = payload or self.latest_payload
+        if not d:
+            return None
+        return {
+            "type": "tile", "id": self.camera_id, "source": self.source_name,
+            "on_air": self.on_air, "mode": d.get("mode"),
+            "people": d.get("n_agents"), "fused": d.get("fused_count"),
+            "risk": d.get("risk_label"), "risk_score": d.get("risk_score"),
+            "trend": d.get("crowd_trend"), "fps": d.get("fps"), "latency_ms": d.get("latency_ms"),
+            "dense": bool(d.get("dense_mode")), "alerts": (d.get("alerts") or [])[:3],
+            "zones": {n: {"count": z["count"], "risk": z["risk"]} for n, z in (d.get("zones") or {}).items()},
+            "age_s": round(time.time() - d["timestamp"], 1) if "timestamp" in d else None,
+            "thumb_b64": self._thumb_b64,
+        }
+
     def _broadcast(self, payload: dict):
-        """Rate-limited WebSocket broadcast."""
+        """Rate-limited WebSocket broadcast: the main view (the camera on air) and the grid (all)."""
         now = time.time()
-        if not self.on_air:                      # another camera is the one on screen
+        if app_loop is None:
             return
-        if now - self._last_broadcast >= 1.0 / Config.WS_HZ and app_loop is not None:
-            asyncio.run_coroutine_threadsafe(
-                manager.broadcast(json.dumps(payload)),
-                app_loop,
-            )
+        if self.on_air and now - self._last_broadcast >= 1.0 / Config.WS_HZ:
+            asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(payload)), app_loop)
             self._last_broadcast = now
+        if grid_manager.active and now - self._last_grid >= 1.0 / Config.GRID_HZ:
+            tile = self.grid_tile(payload)
+            if tile is not None:
+                asyncio.run_coroutine_threadsafe(grid_manager.broadcast(json.dumps(tile)), app_loop)
+            self._last_grid = now
 
     def twin_scene(self) -> dict:
         """
@@ -2133,6 +2176,12 @@ class TwinPipeline:
 
         _, buf        = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 72])
         annotated_b64 = base64.b64encode(buf).decode()
+        if grid_manager.active:                 # a small copy for the multi-feed grid tiles
+            tw = min(Config.GRID_THUMB_W, overlay.shape[1])
+            thumb = cv2.resize(overlay, (tw, max(1, round(overlay.shape[0] * tw / overlay.shape[1]))),
+                               interpolation=cv2.INTER_AREA)
+            self._thumb_b64 = base64.b64encode(
+                cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, 60])[1]).decode()
 
         # ── Throughput and end-to-end latency ─────────────────────────────
         t1  = time.perf_counter()
@@ -2544,6 +2593,7 @@ class CDTPipeline(TwinPipeline):
             frame, seq, captured_at = item
             gap      = 1.0 if last_seq is None else (seq - last_seq) / Config.FRAME_SKIP
             last_seq = seq
+            video.taken(seq)
 
             with self._switch_lock:
                 if self.video is not video:
@@ -3013,6 +3063,7 @@ class ConnectionManager:
 app      = FastAPI(title="Crowd Digital Twin", version="2.0")
 manager  = ConnectionManager()               # dashboard (/ws)
 twin_manager = ConnectionManager()           # 3D twin (/ws/twin)
+grid_manager = ConnectionManager()           # multi-feed grid (/ws/grid): every camera
 pipeline: Optional[TwinPipeline] = None
 twin_service: Optional[TwinService] = None
 # Multi-camera: one pipeline + twin service per camera; `pipeline` / `twin_service`
@@ -3059,6 +3110,22 @@ async def ws_endpoint(ws: WebSocket):
             await ws.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(ws)
+
+
+@app.websocket("/ws/grid")
+async def ws_grid(ws: WebSocket):
+    """The multi-feed grid: a tile (numbers + small annotated image) per camera,
+    each camera sending its own at GRID_HZ, whichever one is on the main view."""
+    await grid_manager.connect(ws)
+    try:
+        for p in (cameras or ({pipeline.camera_id: pipeline} if pipeline else {})).values():
+            tile = p.grid_tile()
+            if tile is not None:
+                await ws.send_text(json.dumps(tile))
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        grid_manager.disconnect(ws)
 
 
 @app.websocket("/ws/twin")
@@ -3136,7 +3203,74 @@ async def cameras_info():
         out.append({"id": cid, "source": p.source_name, "on_air": p is pipeline,
                     "people": d.get("n_agents"), "risk": d.get("risk_label"),
                     "fps": d.get("fps"), "dense": p.dense})
-    return {"cameras": out, "site": site is not None}
+    return {"cameras": out, "site": site is not None,
+            "addable": isinstance(pipeline, CDTPipeline) and len(cams) < Config.MAX_CAMERAS,
+            "max": Config.MAX_CAMERAS}
+
+
+def camera_source(body: dict):
+    """A video from /api/sources ({"name": …}) or a camera / stream ({"url": …}) → what to open."""
+    if "url" in body:
+        if not Config.ALLOW_STREAM_URLS:
+            raise HTTPException(403, "Opening cameras / stream URLs is switched off")
+        src = stream_source(body.get("url"))
+        if src is None:
+            raise HTTPException(422, "Give a camera number or an rtsp:// / http(s):// URL")
+        return src
+    match = [p for p in video_files() if p.name == body.get("name")]
+    if not match:
+        raise HTTPException(404, f"No video named {body.get('name')!r} in {Config.VIDEO_DIR}/")
+    return match[0].as_posix()
+
+
+@app.post("/api/cameras")
+async def add_camera(body: dict = Body(...)):
+    """
+    Add a camera while running: {"name": "a.mp4"} or {"url": "rtsp://…"} / {"url": "0"}.
+    It gets its own calibration, twin and forecast, and shares the models of
+    the cameras already running; it shows up in the multi-feed grid at once.
+    """
+    if not isinstance(pipeline, CDTPipeline):
+        raise HTTPException(409, "Cameras can only be added to a live run (not a replay)")
+    if len(cameras) >= Config.MAX_CAMERAS:
+        raise HTTPException(409, f"At most {Config.MAX_CAMERAS} cameras at once")
+    src = camera_source(body)
+    first = next(iter(cameras.values()))
+
+    def build():
+        p = CDTPipeline(src, share=first)
+        p.start()                                # raises RuntimeError if it can't be opened
+        return p
+    try:
+        p = await asyncio.to_thread(build)
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+    n = 1
+    while f"cam{n}" in cameras:
+        n += 1
+    p.camera_id, p.on_air = f"cam{n}", False
+    cameras[p.camera_id] = p
+    twin_services[p.camera_id] = TwinService(p)
+    twin_services[p.camera_id].start()
+    return {"id": p.camera_id, "source": p.source_name}
+
+
+@app.delete("/api/cameras/{cid}")
+async def remove_camera(cid: str):
+    """Stop a camera and take it off the grid. The last one can't be removed."""
+    global pipeline, twin_service
+    if cid not in cameras:
+        raise HTTPException(404, f"No camera {cid!r}; cameras: {', '.join(cameras) or 'none'}")
+    if len(cameras) < 2:
+        raise HTTPException(409, "That is the only camera")
+    p = cameras.pop(cid)
+    ts = twin_services.pop(cid, None)
+    if p is pipeline:                            # it was on the main view: show another
+        pipeline = next(iter(cameras.values()))
+        pipeline.on_air = True
+        twin_service = twin_services.get(pipeline.camera_id)
+    await asyncio.to_thread(lambda: (ts.stop() if ts else None, p.stop()))
+    return {"removed": cid, "on_air": pipeline.camera_id}
 
 
 @app.post("/api/camera")
@@ -3222,17 +3356,7 @@ async def set_source(body: dict = Body(...)):
     """
     if not isinstance(pipeline, CDTPipeline):
         raise HTTPException(409, "Sources can't be switched in replay mode")
-    if "url" in body:
-        if not Config.ALLOW_STREAM_URLS:
-            raise HTTPException(403, "Opening cameras / stream URLs is switched off")
-        src = stream_source(body.get("url"))
-        if src is None:
-            raise HTTPException(422, "Give a camera number or an rtsp:// / http(s):// URL")
-    else:
-        match = [p for p in video_files() if p.name == body.get("name")]
-        if not match:
-            raise HTTPException(404, f"No video named {body.get('name')!r} in {Config.VIDEO_DIR}/")
-        src = match[0].as_posix()
+    src = camera_source(body)
     try:
         await asyncio.to_thread(pipeline.switch_source, src)
     except RuntimeError as e:
@@ -3328,6 +3452,9 @@ if __name__ == "__main__":
     parser.add_argument("--site", metavar="JSON",
                         help="site file placing the cameras on one map (see multicam.py): people in "
                              "overlapping views are counted once in /api/site")
+    parser.add_argument("--realtime", action="store_true",
+                        help="Video files: drop frames like a live camera when the pipeline is slower "
+                             "than the video (default: never skip frames; playback slows instead)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", default=8000, type=int)
     parser.add_argument("--device", default=Config.DEVICE,
@@ -3374,6 +3501,7 @@ if __name__ == "__main__":
     Config.IOT_ENABLED      = bool(args.iot or args.mqtt) or Config.IOT_ENABLED
     Config.YOLO_MODEL       = args.body or Config.YOLO_MODEL
     Config.HBOX_MODEL       = args.head or Config.HBOX_MODEL
+    Config.FILE_REALTIME    = args.realtime or Config.FILE_REALTIME
     if args.dense_model:                     # one model for every source
         Config.DENSE_MODEL, Config.DENSE_MODEL_LOWRES = args.dense_model, None
 

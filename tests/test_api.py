@@ -129,6 +129,41 @@ def test_live_stream_reconnects():
     return "stream reopened after it stopped delivering frames"
 
 
+def test_slow_pipeline_skips_no_file_frames():
+    """A video file waits for a slow pipeline instead of skipping frames (--realtime drops them)."""
+    import time
+    from pathlib import Path
+    from main import VideoInputHandler
+    if not Path("videos/demo.mp4").exists():
+        return "skipped (no videos/demo.mp4)"
+
+    def gaps(realtime):
+        Config.FILE_REALTIME = realtime
+        v = VideoInputHandler("videos/demo.mp4")
+        last, out = None, []
+        try:
+            v.start()
+            while len(out) < 4:
+                item = v.read()
+                if item is None or (last is not None and item[1] - last < Config.FRAME_SKIP):
+                    time.sleep(0.002)
+                    continue
+                if last is not None:
+                    out.append(item[1] - last)
+                last = item[1]
+                v.taken(last)
+                time.sleep(0.4)                   # a slow CPU
+        finally:
+            v.stop()
+            Config.FILE_REALTIME = False
+        return out
+
+    held, live = gaps(False), gaps(True)
+    assert held == [Config.FRAME_SKIP] * 4, held
+    assert min(live) > Config.FRAME_SKIP, live
+    return f"frame gaps {held} held vs {live} realtime"
+
+
 def test_mqtt_gate_messages_reach_the_fusion():
     """A gate counter publishing over MQTT (handler only: no broker needed)."""
     from types import SimpleNamespace

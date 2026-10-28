@@ -23,3 +23,24 @@ results/
 results.csv
 # Local handoff notes (not published)
 handoff.md
+
+# Exported models (export.py) — build them on the target machine
+*.onnx
+*.engine
+
+# Local datasets and converted multi-camera videos (scripts/pets_to_mp4.py)
+pets/
+videos/pets/
+videos/terrace/
+
+# Backups made by scripts/bigger_fonts.py and hand edits
+static/index.orig.html
+*.bak
+
+# Editor / OS clutter
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.zip
